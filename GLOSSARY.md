@@ -37,13 +37,25 @@ _Avoid_: Viewed, Progress
 
 ### Discussions
 
+**Comment**:
+Anything a person posts in a lesson's discussion: either a top-level Comment or a reply to one. Replies are one level deep. A top-level Comment by the course's Instructor or a Platform Admin is just a Comment.
+_Avoid_: Post, Message, Announcement
+
 **Discussion Question**:
-A top-level comment on a lesson by anyone other than the course's Instructor.
+A top-level Comment on a lesson by anyone other than the course's Instructor or a Platform Admin. Whether a Comment is a Discussion Question depends only on where it sits and who wrote it; nobody marks it as one.
 _Avoid_: Question (on its own, which clashes with quiz questions), Thread
 
 **Discussion Reply**:
-A comment that answers a Discussion Question. Replies are one level deep.
+A Comment made in reply to a Discussion Question.
 _Avoid_: Reply (on its own), Answer
+
+**Answered Discussion Question**:
+A Discussion Question with at least one Discussion Reply, still in place, from the course's Instructor or a Platform Admin. Replies from other Students don't answer it. If those staff replies are all deleted, it is unanswered again.
+_Avoid_: Resolved, Closed
+
+**Unanswered Discussion Question**:
+A Discussion Question that the course's Instructor and the Platform Admins haven't replied to yet.
+_Avoid_: Open, Pending
 
 ### Purchases
 
@@ -109,6 +121,26 @@ _Avoid_: Watch cap, Viewing threshold
 A message Cadence sends a person to tell them something that concerns them has happened.
 _Avoid_: Alert, Message, Activity
 
+**Notification Type**:
+The kind of thing that happened, such as a Discussion Question being answered or a Refund Request being approved. It fixes who receives the Notification and which Channels it goes out on by default.
+_Avoid_: Event, Category, Topic
+
+**Mandatory Notification Type**:
+A Notification Type nobody can opt out of, such as those about a Refund Request or a Refund.
+_Avoid_: Required, Critical
+
+**Email Opt-out**:
+A person's choice to stop receiving email for one Notification Type. Those Notifications still appear in their Notification Feed.
+_Avoid_: Unsubscribe (the email link that creates one), Mute
+
 **Notification Feed**:
 The place inside Cadence where a person sees their Notifications.
 _Avoid_: Inbox, Activity feed
+
+**Channel**:
+A way a Notification reaches a person, such as email or the Notification Feed.
+_Avoid_: Medium, Transport
+
+**Delivery**:
+The work of getting one Notification to one person over one Channel. It may take several attempts and ends either sent or failed.
+_Avoid_: Dispatch, Send
