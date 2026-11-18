@@ -2,20 +2,25 @@
 
 Research for [#9](https://github.com/pabloetoledo81/cohort-005-project/issues/9) (child of map [#2](https://github.com/pabloetoledo81/cohort-005-project/issues/2)). This document lists the options and their trade-offs. It does not choose one; a later ticket makes that decision.
 
-Researched 2026-11-18 against `main` at commit `172ef6b`.
+Researched 2026-11-18 against the local `main` checkout. The pushed `origin/main` is still at the initial commit; the files cited below exist in local `main` only.
 
-## 1. What the repo actually has today
+## 1. What the repo has today
 
-> **Discrepancy to resolve first.** The ticket and the map refer to `docs/adr/0006-one-sqlite-file-through-drizzle.md`, `app/lib/mailer.server.ts` (Postmark, `.outbox/` in dev), `sendEmail`, and `app/routes/admin.refunds.tsx`. None of these files exist on `main` (checked with `git ls-tree -r origin/main`). `GLOSSARY.md` and `docs/adr/` are missing too. Either they live on a branch that hasn't been merged, or the map's notes are ahead of the code. Everything below is based on what is committed.
-
-- **Database:** one SQLite file, `data.db`, opened lazily through `better-sqlite3` and wrapped in Drizzle. The pragmas set are `journal_mode = WAL` and `foreign_keys = ON` (`app/db/index.ts`). Locked versions: `better-sqlite3` 12.11.1 and `drizzle-orm` 0.45.2 (`package-lock.json`).
+- **Database ([ADR 0006](../adr/0006-one-sqlite-file-through-drizzle.md)):**
+  - Cadence "runs as one server process". Its data is in one SQLite file, `data.db`, opened with `better-sqlite3` and queried through Drizzle.
+  - Consequences the ADR records: "There is one writer at a time, and the app cannot run on more than one machine against the same data." Moving to a networked database would mean "making every synchronous query async".
+  - `app/db/index.ts` sets `journal_mode = WAL` and `foreign_keys = ON`, and pins no `busy_timeout`. `package.json` allows the `better-sqlite3@12.11.1` install script and declares `drizzle-orm ^0.45.2`.
 - **Server process:** `npm start` runs `react-router-serve ./build/server/index.js` (`package.json`). That is one Node process. No cluster or worker setup is configured.
-- **Email today:** no transport is wired up.
-  - `app/routes/courses.$slug.refund.ts` builds the refund email with `buildReversalEmail` and `console.log`s it inline, right after `db.insert(refunds)`. Its own comment says: "There is no mail transport wired up yet, so the built message goes to the server log."
-  - The refund insert and the email are not in a transaction together. If the process died between them, the refund row would exist and the email would be lost.
-  - `app/routes/courses.$slug.purchase.tsx` has an `enrollUser(..., sendEmail: boolean, ...)` flag whose body is only the stub comment `// Would send welcome email here`.
-- **Transactions:** nothing under `app/` calls `db.transaction` today (grep).
-- **Deployment config:** none. There is no `Dockerfile`, `fly.toml`, `render.yaml`, `Procfile`, `docker-compose*` or `.github/workflows` for the app. The only Dockerfile is `.sandcastle/Dockerfile`, which builds the agent sandbox (`ENTRYPOINT ["sleep", "infinity"]`), not the app. **The deployment target is therefore unknown.** Several of the trade-offs below depend on it: whether the host keeps a long-lived process, whether the disk is persistent, and how many instances run.
+- **Email today (`app/lib/mailer.server.ts`):**
+  - `sendEmail(email, transport = defaultTransport())` uses `postmarkTransport` when `POSTMARK_SERVER_TOKEN` is set. That transport does a `fetch` POST to `https://api.postmarkapp.com/email` and throws on a non-OK response. Otherwise it uses `outboxTransport(".outbox")`, which writes one JSON file per message.
+  - The transport has no retry and no request timeout.
+- **Inline call sites:**
+  - `app/routes/courses.$slug.refund.ts` calls `raiseRefundRequest(...)` (in `app/lib/refunds.server.ts`, which inserts the request without `db.transaction`), then `await sendEmail(result.email)`, then redirects.
+  - `app/routes/admin.refunds.tsx` calls `approveRefundRequest` or `declineRefundRequest`. Each wraps its writes in `db.transaction(...)` and returns the email built inside it. The route then does `await sendEmail(result.email)` *after* the transaction has committed.
+  - So in both flows the email is sent in the request, after the DB commit. Reading the code, this has two consequences:
+    - If Postmark fails, `sendEmail` throws. The user's action errors even though the refund state has already been written, and the email is not retried.
+    - If the process dies between the commit and the send, the email is lost silently.
+- **Deployment config:** none. The main checkout has no `Dockerfile`, `fly.toml`, `render.yaml`, `Procfile`, `docker-compose*`, `railway.*`, `nixpacks.toml` or `.github/workflows/*`. The only Dockerfile in the repo is `.sandcastle/Dockerfile`, which builds the agent sandbox (`ENTRYPOINT ["sleep", "infinity"]`), not the app. **The deployment target is unknown.** Beyond what ADR 0006 states (one process, one machine), several trade-offs below depend on it: whether the host keeps a long-lived process, whether the disk is persistent, and whether it offers platform cron.
 
 ## 2. Constraints that come from SQLite itself
 
@@ -30,12 +35,13 @@ These apply to every option, from the [SQLite WAL documentation](https://www.sql
 
 ### (a) Inline in the request
 
-The action writes its rows and then calls the email transport, and the in-app notification insert, before returning. This is what the refund route does today, using `console.log`.
+The action writes its rows and then calls the email transport, and the in-app notification insert, before returning. Both refund routes do this today with `await sendEmail(...)`.
 
 - **Retries:** none, unless you write an in-request retry loop, and that adds latency to the user's request.
 - **Failure isolation:** poor.
   - An email provider outage or timeout either fails the user's action or is swallowed and lost.
   - Because the send can't be inside the better-sqlite3 transaction, a crash between commit and send loses the notification silently.
+  - Postmark latency adds directly to the response time, because `postmarkTransport` sets no fetch timeout.
   - The in-app insert can be put in the same transaction as the business write. That is cheap and atomic.
 - **Scheduling (digests):** none. Digests need something that runs on a timer, so this option needs (b), (c) or (d) for them anyway.
 - **Multi-instance:** not a concern, because nothing is shared.
@@ -135,7 +141,7 @@ In-process cron libraries are the lightweight cousin: [`croner`](https://www.npm
 
 ## 5. Open questions for the decision ticket
 
-1. Where are `mailer.server.ts`, ADR 0006, `admin.refunds.tsx` and `GLOSSARY.md`? The map assumes they exist; `main` doesn't have them.
+1. Local `main` is ahead of `origin/main`. The files cited here aren't on GitHub yet, so the links won't resolve until local `main` is pushed.
 2. What is the deployment target? Specifically: does it keep a long-lived process (needed by (b), (c) and in-process cron), is the disk persistent, and does it offer a platform cron?
 3. Are rare duplicate emails acceptable (at-least-once), or must sends be deduplicated with a provider idempotency key? Postmark's support for one was not verified here.
 4. Should the outbox or delivery table double as the per-Channel delivery record that map #2 lists under "Notification data model and storage"?
