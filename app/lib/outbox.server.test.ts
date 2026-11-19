@@ -50,6 +50,7 @@ function queueRefundEmail(at = NOW) {
       buyer: { id: base.user.id, name: base.user.name },
       courseTitle: "Test Course",
       amountPaid: 7900,
+      approvedAmount: null,
       kind: "individual_purchase",
       note: null,
     },

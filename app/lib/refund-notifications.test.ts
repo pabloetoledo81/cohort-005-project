@@ -5,7 +5,7 @@ import * as schema from "~/db/schema";
 import {
   DeliveryStatus,
   NotificationType,
-  RefundStatus,
+  RefundRequestStatus,
   UserRole,
 } from "~/db/schema";
 import {
@@ -127,7 +127,9 @@ describe("raising a Refund Request", () => {
       attempts: 0,
       nextAttemptAt: NOW.toISOString(),
     });
-    expect(delivery.body).toContain("$79.00, the amount you paid");
+    // An Individual Purchase's amount is decided on review, so none is promised.
+    expect(delivery.body).toContain("You paid $79.00 for it.");
+    expect(delivery.body).not.toContain("the amount you paid");
     expect(delivery.body).toContain("We'll let you know once it's been decided.");
     expect(delivery.body).not.toContain("email you again");
     // Mandatory: no unsubscribe link.
@@ -166,7 +168,7 @@ describe("raising a Refund Request", () => {
       raiseRefundRequest(db, purchase.id, base.user.id, "Not for me.", NOW)
     ).toThrow();
 
-    expect(db.select().from(schema.refunds).all()).toHaveLength(0);
+    expect(db.select().from(schema.refundRequests).all()).toHaveLength(0);
     expect(allNotifications()).toHaveLength(0);
   });
 
@@ -191,7 +193,7 @@ describe("deciding a Refund Request", () => {
     const purchase = buyForSelf();
     const id = raise(purchase.id);
 
-    approveRefundRequest(db, id, platformAdminId, "Sorry it didn't work out.", NOW);
+    approveRefundRequest(db, id, platformAdminId, null, "Sorry it didn't work out.", NOW);
 
     const notification = allNotifications()[1];
     expect(notification).toMatchObject({
@@ -232,7 +234,7 @@ describe("deciding a Refund Request", () => {
   it("writes nothing for a decision that loses the race", () => {
     const purchase = buyForSelf();
     const id = raise(purchase.id);
-    approveRefundRequest(db, id, platformAdminId, null, NOW);
+    approveRefundRequest(db, id, platformAdminId, null, null, NOW);
 
     declineRefundRequest(db, id, platformAdminId, "Too late.", NOW);
 
@@ -241,7 +243,7 @@ describe("deciding a Refund Request", () => {
       NotificationType.RefundRequestApproved,
     ]);
     expect(
-      db.select().from(schema.refunds).get()?.status
-    ).toBe(RefundStatus.Approved);
+      db.select().from(schema.refundRequests).get()?.status
+    ).toBe(RefundRequestStatus.Approved);
   });
 });

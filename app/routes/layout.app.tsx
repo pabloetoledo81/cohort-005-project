@@ -3,7 +3,11 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
-import { getCurrentUserId, getDevCountry } from "~/lib/session";
+import {
+  getCurrentUserId,
+  getDevCountry,
+  getDevRefundOutcome,
+} from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { getUnreadCount } from "~/lib/notifications.server";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -213,6 +217,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
+    refundOutcome: await getDevRefundOutcome(request),
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
     unreadNotificationCount: currentUserId
       ? getUnreadCount(db, currentUserId)
@@ -228,6 +233,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     devCountry,
     countryTierInfo,
     countries,
+    refundOutcome,
     isTeamAdmin: userIsTeamAdmin,
     unreadNotificationCount,
   } = loaderData;
@@ -249,6 +255,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         devCountry={devCountry}
         countryTierInfo={countryTierInfo}
         countries={countries}
+        refundOutcome={refundOutcome}
       />
       <Toaster position="bottom-right" richColors closeButton />
     </div>

@@ -6,11 +6,12 @@ import type { Route } from "./+types/settings";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
+import { BuyerRefundStatus } from "~/components/refund-status";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
-import { UserRole, RefundStatus, users } from "~/db/schema";
+import { UserRole, RefundRequestStatus, users } from "~/db/schema";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
@@ -132,7 +133,7 @@ export async function action({ request }: Route.ActionArgs) {
 export default function Settings({ loaderData }: Route.ComponentProps) {
   const { user, refundRequests, emailPreferences } = loaderData;
   const openCount = refundRequests.filter(
-    (refundRequest) => refundRequest.status === RefundStatus.Open
+    (refundRequest) => refundRequest.status === RefundRequestStatus.Open
   ).length;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -257,6 +258,12 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                     </>
                   )}
                 </p>
+                {refundRequest.refund && (
+                  <BuyerRefundStatus
+                    refund={refundRequest.refund}
+                    amountPaid={refundRequest.amountPaid}
+                  />
+                )}
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
                 {refundRequest.decisionNote && (
                   <p className="mt-2 rounded-md bg-muted p-2 text-sm">
@@ -358,26 +365,26 @@ function EmailToggle({ preference }: { preference: EmailPreference }) {
 }
 
 const REFUND_STATUS_BADGES: Record<
-  RefundStatus,
+  RefundRequestStatus,
   { label: string; className: string }
 > = {
-  [RefundStatus.Open]: {
+  [RefundRequestStatus.Open]: {
     label: "Open",
     className:
       "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
   },
-  [RefundStatus.Approved]: {
+  [RefundRequestStatus.Approved]: {
     label: "Approved",
     className:
       "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   },
-  [RefundStatus.Declined]: {
+  [RefundRequestStatus.Declined]: {
     label: "Declined",
     className: "bg-muted text-muted-foreground",
   },
 };
 
-function RefundStatusBadge({ status }: { status: RefundStatus }) {
+function RefundStatusBadge({ status }: { status: RefundRequestStatus }) {
   const badge = REFUND_STATUS_BADGES[status];
   return (
     <span

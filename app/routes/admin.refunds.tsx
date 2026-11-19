@@ -3,9 +3,10 @@ import { useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
-import { getCurrentUserId } from "~/lib/session";
+import { getCurrentUserId, getDevRefundOutcome } from "~/lib/session";
+import { simulatedPaymentProvider } from "~/lib/payments.server";
 import { parseFormData } from "~/lib/validation";
-import { RefundStatus, UserRole, users } from "~/db/schema";
+import { RefundRequestStatus, RefundStatus, UserRole, users } from "~/db/schema";
 import { db } from "~/db";
 import { eq } from "drizzle-orm";
 import { Card, CardContent } from "~/components/ui/card";
@@ -17,19 +18,35 @@ import { formatPrice } from "~/lib/utils";
 import {
   approveRefundRequest,
   declineRefundRequest,
+  payRefund,
+  retryRefund,
   listRefundRequestsForReview,
   type RefundRequestForReview,
 } from "~/lib/refunds.server";
 import { RULE_BREAK_LABELS } from "~/lib/refund-rules";
 
 const refundFilterSchema = z
-  .nativeEnum(RefundStatus)
-  .catch(RefundStatus.Open);
+  .nativeEnum(RefundRequestStatus)
+  .catch(RefundRequestStatus.Open);
 
 const adminRefundActionSchema = z.discriminatedUnion("intent", [
   z.object({
     intent: z.literal("approve"),
     refundRequestId: z.coerce.number().int(),
+    // Dollars, as typed. Only an Individual Purchase sends one; a Team
+    // Licence is always refunded in full.
+    amount: z
+      .string()
+      .trim()
+      .optional()
+      .transform((value, ctx) => {
+        if (!value) return null;
+        if (!/^\d+(\.\d{1,2})?$/.test(value)) {
+          ctx.addIssue({ code: "custom", message: "Enter an amount like 40 or 39.50." });
+          return z.NEVER;
+        }
+        return Math.round(Number(value) * 100);
+      }),
     note: z
       .string()
       .trim()
@@ -44,6 +61,10 @@ const adminRefundActionSchema = z.discriminatedUnion("intent", [
       .trim()
       .min(1, "Write the buyer a note saying why it was declined.")
       .max(1000, "Please keep the note under 1000 characters."),
+  }),
+  z.object({
+    intent: z.literal("retry"),
+    refundId: z.coerce.number().int(),
   }),
 ]);
 
@@ -103,42 +124,70 @@ export async function action({ request }: Route.ActionArgs) {
     );
   }
 
-  const { intent, refundRequestId, note } = parsed.data;
+  const input = parsed.data;
 
-  const result =
-    intent === "approve"
-      ? approveRefundRequest(
-          db,
-          refundRequestId,
-          platformAdmin.id,
-          note || null,
-          new Date()
-        )
-      : declineRefundRequest(
-          db,
-          refundRequestId,
-          platformAdmin.id,
-          note,
-          new Date()
-        );
-
-  if (!result.ok) {
-    return data({ error: result.error }, { status: result.status });
+  if (input.intent === "decline") {
+    const result = declineRefundRequest(
+      db,
+      input.refundRequestId,
+      platformAdmin.id,
+      input.note,
+      new Date()
+    );
+    if (!result.ok) {
+      return data({ error: result.error }, { status: result.status });
+    }
+    return { success: true, message: "Refund request declined." };
   }
 
+  // Built before anything is approved, so a simulator that refuses to run
+  // (in production) stops the approval instead of stranding a Refund.
+  let provider;
+  try {
+    provider = simulatedPaymentProvider(await getDevRefundOutcome(request));
+  } catch (error) {
+    return data(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 503 }
+    );
+  }
+
+  if (input.intent === "retry") {
+    const result = await retryRefund(db, provider, input.refundId, new Date());
+    if (!result.ok) {
+      return data({ error: result.error }, { status: result.status });
+    }
+    return result.status === RefundStatus.Issued
+      ? { success: true, message: "Refund issued." }
+      : { error: "The refund failed again." };
+  }
+
+  const approved = approveRefundRequest(
+    db,
+    input.refundRequestId,
+    platformAdmin.id,
+    input.amount,
+    input.note || null,
+    new Date()
+  );
+  if (!approved.ok) {
+    return data({ error: approved.error }, { status: approved.status });
+  }
+
+  // The approval has committed; now send the money.
+  const paid = await payRefund(db, provider, approved.refundId, new Date());
+  if (paid.ok && paid.status === RefundStatus.Issued) {
+    return { success: true, message: "Refund request approved and the refund issued." };
+  }
   return {
-    success: true,
-    message:
-      intent === "approve"
-        ? "Refund request approved."
-        : "Refund request declined.",
+    error: "Refund request approved, but the refund failed. You can retry it.",
   };
 }
 
-const FILTERS: { status: RefundStatus; label: string }[] = [
-  { status: RefundStatus.Open, label: "Open" },
-  { status: RefundStatus.Approved, label: "Approved" },
-  { status: RefundStatus.Declined, label: "Declined" },
+const FILTERS: { status: RefundRequestStatus; label: string }[] = [
+  { status: RefundRequestStatus.Open, label: "Open" },
+  { status: RefundRequestStatus.Approved, label: "Approved" },
+  { status: RefundRequestStatus.Declined, label: "Declined" },
 ];
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
@@ -170,7 +219,7 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
             size="sm"
             onClick={() =>
               setSearchParams(
-                filter.status === RefundStatus.Open
+                filter.status === RefundRequestStatus.Open
                   ? {}
                   : { status: filter.status }
               )
@@ -265,8 +314,12 @@ function RefundRequestCard({
     { success: true; message: string } | { error: string }
   >();
   const [note, setNote] = useState("");
+  const fullAmount = (refundRequest.amountPaid / 100).toFixed(2);
+  const [amount, setAmount] = useState(fullAmount);
   const isSubmitting = fetcher.state !== "idle";
-  const isOpen = refundRequest.status === RefundStatus.Open;
+  const isOpen = refundRequest.status === RefundRequestStatus.Open;
+  const isIndividual = refundRequest.kind === "individual_purchase";
+  const isPartial = isIndividual && Number(amount) < Number(fullAmount);
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
@@ -279,7 +332,20 @@ function RefundRequestCard({
 
   function decide(intent: "approve" | "decline") {
     fetcher.submit(
-      { intent, refundRequestId: String(refundRequest.id), note },
+      {
+        intent,
+        refundRequestId: String(refundRequest.id),
+        note,
+        // A Team Licence is always refunded in full, so it sends no amount.
+        ...(intent === "approve" && isIndividual ? { amount } : {}),
+      },
+      { method: "post" }
+    );
+  }
+
+  function retry(refundId: number) {
+    fetcher.submit(
+      { intent: "retry", refundId: String(refundId) },
       { method: "post" }
     );
   }
@@ -323,11 +389,36 @@ function RefundRequestCard({
 
         {isOpen ? (
           <div className="space-y-2 border-t pt-4">
+            {isIndividual ? (
+              <label className="flex items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Refund amount $</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="w-28 rounded-md border bg-background px-2 py-1"
+                  aria-label="Refund amount in dollars"
+                />
+                <span className="text-xs text-muted-foreground">
+                  up to {formatPrice(refundRequest.amountPaid)}
+                </span>
+              </label>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                A Team Licence is refunded in full:{" "}
+                {formatPrice(refundRequest.amountPaid)}.
+              </p>
+            )}
             <Textarea
               value={note}
               onChange={(e) => setNote(e.target.value)}
               rows={2}
-              placeholder="A note to the buyer. Required to decline."
+              placeholder={
+                isPartial
+                  ? "A note to the buyer. Required for a partial refund."
+                  : "A note to the buyer. Required to decline."
+              }
             />
             {!refundRequest.canApprove && (
               <p className="text-xs text-muted-foreground">
@@ -339,9 +430,13 @@ function RefundRequestCard({
               <Button
                 size="sm"
                 onClick={() => decide("approve")}
-                disabled={isSubmitting || !refundRequest.canApprove}
+                disabled={
+                  isSubmitting ||
+                  !refundRequest.canApprove ||
+                  (isPartial && note.trim().length === 0)
+                }
               >
-                Approve
+                {isPartial ? "Approve partial refund" : "Approve"}
               </Button>
               <Button
                 size="sm"
@@ -355,7 +450,7 @@ function RefundRequestCard({
           </div>
         ) : (
           <div className="border-t pt-4 text-sm text-muted-foreground">
-            {refundRequest.status === RefundStatus.Approved
+            {refundRequest.status === RefundRequestStatus.Approved
               ? "Approved"
               : "Declined"}
             {refundRequest.decidedByName &&
@@ -367,10 +462,80 @@ function RefundRequestCard({
                 {refundRequest.decisionNote}
               </p>
             )}
+            {refundRequest.refund && (
+              <RefundState
+                refund={refundRequest.refund}
+                amountPaid={refundRequest.amountPaid}
+                isSubmitting={isSubmitting}
+                onRetry={retry}
+              />
+            )}
           </div>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+const REFUND_STATUS_LABELS: Record<RefundStatus, { label: string; className: string }> = {
+  [RefundStatus.Pending]: {
+    label: "Refund pending",
+    className: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
+  },
+  [RefundStatus.Issued]: {
+    label: "Refund issued",
+    className: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
+  },
+  [RefundStatus.Failed]: {
+    label: "Refund failed",
+    className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+  },
+};
+
+/** The money side of an Approved Refund Request, with Retry when allowed. */
+function RefundState({
+  refund,
+  amountPaid,
+  isSubmitting,
+  onRetry,
+}: {
+  refund: NonNullable<RefundRequestForReview["refund"]>;
+  amountPaid: number;
+  isSubmitting: boolean;
+  onRetry: (refundId: number) => void;
+}) {
+  const badge = REFUND_STATUS_LABELS[refund.status];
+  return (
+    <div className="mt-3 space-y-2 text-foreground">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${badge.className}`}>
+          {badge.label}
+        </span>
+        <span>
+          {formatPrice(refund.approvedAmount)}
+          {refund.approvedAmount < amountPaid &&
+            ` of ${formatPrice(amountPaid)} (partial)`}
+        </span>
+        {refund.attempts > 1 && (
+          <span className="text-xs text-muted-foreground">
+            {refund.attempts} attempts
+          </span>
+        )}
+      </div>
+      {refund.status === RefundStatus.Failed && refund.failureReason && (
+        <p className="text-xs text-muted-foreground">{refund.failureReason}</p>
+      )}
+      {refund.canRetry && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onRetry(refund.id)}
+          disabled={isSubmitting}
+        >
+          Retry refund
+        </Button>
+      )}
+    </div>
   );
 }
 

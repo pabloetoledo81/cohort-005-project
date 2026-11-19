@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
@@ -10,15 +10,19 @@ import {
   lessons,
   modules,
   purchases,
+  refundRequests,
   refunds,
   users,
   videoWatchEvents,
   LessonProgressStatus,
   NotificationType,
+  RefundRequestStatus,
   RefundStatus,
 } from "~/db/schema";
 import type { RefundRequestPayload } from "~/lib/notification-types.server";
 import { notify } from "~/lib/notifications.server";
+import type { PaymentProvider, RefundPaymentResult } from "~/lib/payments.server";
+import { formatPrice } from "~/lib/utils";
 import {
   REFUND_COMPLETION_LIMIT,
   REFUND_WATCH_LIMIT_SECONDS,
@@ -94,12 +98,12 @@ function kindOf(seats: Seat[]): PurchaseKind {
 function getRefundRequestWithStatus(
   db: Queryable,
   purchaseId: number,
-  status: RefundStatus
+  status: RefundRequestStatus
 ) {
   return db
     .select()
-    .from(refunds)
-    .where(and(eq(refunds.purchaseId, purchaseId), eq(refunds.status, status)))
+    .from(refundRequests)
+    .where(and(eq(refundRequests.purchaseId, purchaseId), eq(refundRequests.status, status)))
     .get();
 }
 
@@ -116,7 +120,7 @@ export function getSeatAvailability(
 ): SeatAvailability {
   if (isClaimed(seat)) return "claimed";
   if (seat.refundedAt !== null) return "refunded";
-  if (getRefundRequestWithStatus(db, seat.purchaseId, RefundStatus.Open)) {
+  if (getRefundRequestWithStatus(db, seat.purchaseId, RefundRequestStatus.Open)) {
     return "on_hold";
   }
   return "available";
@@ -281,7 +285,7 @@ export function checkRefundRequest(
     return { ok: false, status: 404, error: "Purchase not found." };
   }
 
-  if (getRefundRequestWithStatus(db, purchase.id, RefundStatus.Open)) {
+  if (getRefundRequestWithStatus(db, purchase.id, RefundRequestStatus.Open)) {
     return {
       ok: false,
       status: 409,
@@ -289,7 +293,7 @@ export function checkRefundRequest(
     };
   }
 
-  if (getRefundRequestWithStatus(db, purchase.id, RefundStatus.Approved)) {
+  if (getRefundRequestWithStatus(db, purchase.id, RefundRequestStatus.Approved)) {
     return {
       ok: false,
       status: 409,
@@ -373,10 +377,10 @@ export function raiseRefundRequest(
     const { purchase } = check;
 
     const refundRequest = tx
-      .insert(refunds)
+      .insert(refundRequests)
       .values({
         purchaseId: purchase.id,
-        status: RefundStatus.Open,
+        status: RefundRequestStatus.Open,
         reason,
         requestedAt: now.toISOString(),
       })
@@ -395,7 +399,8 @@ function refundRequestPayload(
   db: Queryable,
   purchase: Purchase,
   refundRequestId: number,
-  note: string | null
+  note: string | null,
+  approvedAmount: number | null = null
 ): RefundRequestPayload {
   const buyer = db
     .select({ id: users.id, name: users.name })
@@ -418,6 +423,7 @@ function refundRequestPayload(
     buyer,
     courseTitle: course.title,
     amountPaid: purchase.amountPaid,
+    approvedAmount,
     kind: kindOf(getSeats(db, purchase.id)),
     note,
   };
@@ -430,29 +436,43 @@ const deciders = alias(users, "deciders");
 function selectRefundRequests(db: Queryable) {
   return db
     .select({
-      id: refunds.id,
-      status: refunds.status,
-      reason: refunds.reason,
-      decisionNote: refunds.decisionNote,
-      requestedAt: refunds.requestedAt,
-      resolvedAt: refunds.resolvedAt,
+      id: refundRequests.id,
+      status: refundRequests.status,
+      reason: refundRequests.reason,
+      decisionNote: refundRequests.decisionNote,
+      requestedAt: refundRequests.requestedAt,
+      resolvedAt: refundRequests.resolvedAt,
       decidedByName: deciders.name,
       purchase: purchases,
       courseTitle: courses.title,
       courseSlug: courses.slug,
       buyerName: users.name,
       buyerEmail: users.email,
+      refund: refunds,
     })
-    .from(refunds)
-    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .from(refundRequests)
+    .innerJoin(purchases, eq(refundRequests.purchaseId, purchases.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .innerJoin(users, eq(purchases.userId, users.id))
-    .leftJoin(deciders, eq(refunds.resolvedByUserId, deciders.id));
+    .leftJoin(deciders, eq(refundRequests.resolvedByUserId, deciders.id))
+    .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id));
+}
+
+/** What a buyer sees of a Refund: never the provider's failure reason. */
+export type RefundForBuyer = {
+  status: RefundStatus;
+  approvedAmount: number;
+} | null;
+
+function refundForBuyer(refund: Refund | null): RefundForBuyer {
+  return refund
+    ? { status: refund.status, approvedAmount: refund.approvedAmount }
+    : null;
 }
 
 export type RefundRequestForReview = {
   id: number;
-  status: RefundStatus;
+  status: RefundRequestStatus;
   reason: string;
   decisionNote: string | null;
   requestedAt: string;
@@ -468,6 +488,16 @@ export type RefundRequestForReview = {
   figures: RefundFigures;
   ruleBreaks: RuleBreak[];
   canApprove: boolean;
+  /** Approving needs an amount for an Individual Purchase only. */
+  kind: PurchaseKind;
+  refund: {
+    id: number;
+    status: RefundStatus;
+    approvedAmount: number;
+    failureReason: string | null;
+    attempts: number;
+    canRetry: boolean;
+  } | null;
 };
 
 /**
@@ -477,12 +507,12 @@ export type RefundRequestForReview = {
  */
 export function listRefundRequestsForReview(
   db: Queryable,
-  status: RefundStatus,
+  status: RefundRequestStatus,
   now: Date
 ): RefundRequestForReview[] {
   const rows = selectRefundRequests(db)
-    .where(eq(refunds.status, status))
-    .orderBy(asc(refunds.requestedAt), asc(refunds.id))
+    .where(eq(refundRequests.status, status))
+    .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
     .all();
 
   return rows.map((row) => {
@@ -515,7 +545,16 @@ export function listRefundRequestsForReview(
       // A Claimed Seat belongs to another student, so the only way out of
       // that request is a decline. See docs/adr/0003.
       canApprove:
-        row.status === RefundStatus.Open && !ruleBreaks.includes("seat_claimed"),
+        row.status === RefundRequestStatus.Open && !ruleBreaks.includes("seat_claimed"),
+      kind: figures.kind,
+      refund: row.refund && {
+        id: row.refund.id,
+        status: row.refund.status,
+        approvedAmount: row.refund.approvedAmount,
+        failureReason: row.refund.failureReason,
+        attempts: row.refund.attempts,
+        canRetry: canRetryRefund(row.refund, now),
+      },
     };
   });
 }
@@ -524,7 +563,7 @@ export function listRefundRequestsForReview(
 export function listRefundRequestsForBuyer(db: Queryable, buyerId: number) {
   return selectRefundRequests(db)
     .where(eq(purchases.userId, buyerId))
-    .orderBy(desc(refunds.requestedAt), desc(refunds.id))
+    .orderBy(desc(refundRequests.requestedAt), desc(refundRequests.id))
     .all()
     .map((row) => ({
       id: row.id,
@@ -536,6 +575,7 @@ export function listRefundRequestsForBuyer(db: Queryable, buyerId: number) {
       courseTitle: row.courseTitle,
       courseSlug: row.courseSlug,
       amountPaid: row.purchase.amountPaid,
+      refund: refundForBuyer(row.refund),
     }));
 }
 
@@ -557,12 +597,22 @@ export function listTeamLicences(db: Queryable, buyerId: number, now: Date) {
     const seats = getSeats(db, purchase.id);
     if (kindOf(seats) !== "team_licence") return [];
 
-    const latestRefundRequest = db
-      .select({ status: refunds.status, decisionNote: refunds.decisionNote })
-      .from(refunds)
-      .where(eq(refunds.purchaseId, purchase.id))
-      .orderBy(desc(refunds.requestedAt), desc(refunds.id))
+    const latest = db
+      .select({
+        status: refundRequests.status,
+        decisionNote: refundRequests.decisionNote,
+        refund: refunds,
+      })
+      .from(refundRequests)
+      .leftJoin(refunds, eq(refunds.refundRequestId, refundRequests.id))
+      .where(eq(refundRequests.purchaseId, purchase.id))
+      .orderBy(desc(refundRequests.requestedAt), desc(refundRequests.id))
       .get();
+    const latestRefundRequest = latest && {
+      status: latest.status,
+      decisionNote: latest.decisionNote,
+      refund: refundForBuyer(latest.refund),
+    };
 
     return [
       {
@@ -591,8 +641,8 @@ function findOpenRefundRequest(
 ): { ok: true; purchase: Purchase } | Failure {
   const refundRequest = tx
     .select()
-    .from(refunds)
-    .where(eq(refunds.id, refundRequestId))
+    .from(refundRequests)
+    .where(eq(refundRequests.id, refundRequestId))
     .get();
 
   if (!refundRequest) {
@@ -601,7 +651,7 @@ function findOpenRefundRequest(
 
   // The first decision wins. A second Platform Admin deciding the same
   // request lands here and is told what already happened.
-  if (refundRequest.status !== RefundStatus.Open) {
+  if (refundRequest.status !== RefundRequestStatus.Open) {
     return {
       ok: false,
       status: 409,
@@ -617,12 +667,64 @@ function findOpenRefundRequest(
   return { ok: true, purchase };
 }
 
+export type ApproveResult = { ok: true; refundId: number } | Failure;
+
 /**
- * Approves an Open Refund Request and ends what its Purchase granted.
+ * The amount a Refund is approved for, or why it can't be. A Team Licence is
+ * always refunded in full (docs/adr/0003). An Individual Purchase gets the
+ * amount the Platform Admin chose (null means the full amount): more than
+ * nothing and no more than was paid. Less than the full amount is a Partial
+ * Refund, and the buyer must be told why.
+ */
+function approvedAmountFor(
+  purchase: Purchase,
+  kind: PurchaseKind,
+  amount: number | null,
+  note: string | null
+): { ok: true; amount: number } | Failure {
+  if (kind === "team_licence") {
+    if (amount !== null && amount !== purchase.amountPaid) {
+      return {
+        ok: false,
+        status: 400,
+        error: "A Team Licence is always refunded in full.",
+      };
+    }
+    return { ok: true, amount: purchase.amountPaid };
+  }
+
+  const chosen = amount ?? purchase.amountPaid;
+  if (!Number.isInteger(chosen) || chosen <= 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: "A refund must be for more than nothing. To return nothing, decline it.",
+    };
+  }
+  if (chosen > purchase.amountPaid) {
+    return {
+      ok: false,
+      status: 400,
+      error: `A refund can't be more than the ${formatPrice(purchase.amountPaid)} that was paid.`,
+    };
+  }
+  if (chosen < purchase.amountPaid && !note) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Write the buyer a note saying why the refund is partial.",
+    };
+  }
+  return { ok: true, amount: chosen };
+}
+
+/**
+ * Approves an Open Refund Request, ends what its Purchase granted, and
+ * creates its Pending Refund. The money is sent afterwards, by payRefund.
  *
- * - An Individual Purchase: the buyer loses their Enrollment, unless
- *   they also hold a Claimed Seat for the course (docs/adr/0004). Their progress stays
- *   (docs/adr/0001).
+ * - An Individual Purchase: the buyer loses their Enrollment, even after a
+ *   Partial Refund, unless they also hold a Claimed Seat for the course
+ *   (docs/adr/0004). Their progress stays (docs/adr/0001).
  * - A Team Licence: its Unclaimed Seats can never be claimed. Refused if any
  *   Seat has been claimed (docs/adr/0003).
  */
@@ -630,17 +732,24 @@ export function approveRefundRequest(
   db: Db,
   refundRequestId: number,
   platformAdminId: number,
+  amount: number | null,
   note: string | null,
   now: Date
-): DecisionResult {
-  return db.transaction((tx): DecisionResult => {
+): ApproveResult {
+  const trimmedNote = note?.trim() || null;
+
+  return db.transaction((tx): ApproveResult => {
     const found = findOpenRefundRequest(tx, refundRequestId);
     if (!found.ok) return found;
 
     const { purchase } = found;
     const seats = getSeats(tx, purchase.id);
+    const kind = kindOf(seats);
 
-    if (kindOf(seats) === "team_licence") {
+    const approved = approvedAmountFor(purchase, kind, amount, trimmedNote);
+    if (!approved.ok) return approved;
+
+    if (kind === "team_licence") {
       if (seats.some(isClaimed)) {
         return {
           ok: false,
@@ -681,25 +790,35 @@ export function approveRefundRequest(
       }
     }
 
-    tx.update(refunds)
+    tx.update(refundRequests)
       .set({
-        status: RefundStatus.Approved,
-        amountRefunded: purchase.amountPaid,
-        decisionNote: note,
+        status: RefundRequestStatus.Approved,
+        decisionNote: trimmedNote,
         resolvedAt: now.toISOString(),
         resolvedByUserId: platformAdminId,
       })
-      .where(eq(refunds.id, refundRequestId))
+      .where(eq(refundRequests.id, refundRequestId))
       .run();
+
+    const refund = tx
+      .insert(refunds)
+      .values({
+        refundRequestId,
+        approvedAmount: approved.amount,
+        status: RefundStatus.Pending,
+        createdAt: now.toISOString(),
+      })
+      .returning({ id: refunds.id })
+      .get();
 
     notify(
       tx,
       NotificationType.RefundRequestApproved,
-      refundRequestPayload(tx, purchase, refundRequestId, note),
+      refundRequestPayload(tx, purchase, refundRequestId, trimmedNote, approved.amount),
       now
     );
 
-    return { ok: true };
+    return { ok: true, refundId: refund.id };
   });
 }
 
@@ -729,14 +848,14 @@ export function declineRefundRequest(
     const found = findOpenRefundRequest(tx, refundRequestId);
     if (!found.ok) return found;
 
-    tx.update(refunds)
+    tx.update(refundRequests)
       .set({
-        status: RefundStatus.Declined,
+        status: RefundRequestStatus.Declined,
         decisionNote: trimmedNote,
         resolvedAt: now.toISOString(),
         resolvedByUserId: platformAdminId,
       })
-      .where(eq(refunds.id, refundRequestId))
+      .where(eq(refundRequests.id, refundRequestId))
       .run();
 
     notify(
@@ -747,5 +866,166 @@ export function declineRefundRequest(
     );
 
     return { ok: true };
+  });
+}
+
+// ─── Sending a Refund ───
+// After approval commits, the money is sent through the payment provider and
+// the outcome recorded in a second transaction. A Refund is sent in one go:
+// Issued means the whole approved amount went, Failed means none of it did.
+//
+// Each attempt first claims the Refund with a conditional update, so two
+// Platform Admins retrying at once can't both send it. A Pending Refund whose
+// attempt started more than REFUND_STUCK_AFTER_MS ago was left stuck (say,
+// the process died mid-attempt) and can be retried too.
+
+export const REFUND_STUCK_AFTER_MS = 5 * 60 * 1000;
+
+type Refund = typeof refunds.$inferSelect;
+
+export type PayResult =
+  | { ok: true; status: RefundStatus.Issued | RefundStatus.Failed }
+  | Failure;
+
+function getRefund(db: Queryable, refundId: number) {
+  return db.select().from(refunds).where(eq(refunds.id, refundId)).get();
+}
+
+/** Whether a Platform Admin may retry this Refund now. */
+export function canRetryRefund(refund: Refund, now: Date): boolean {
+  if (refund.status === RefundStatus.Failed) return true;
+  if (refund.status !== RefundStatus.Pending) return false;
+  // Never attempted (the process died right after approval) counts from when
+  // the Refund was created.
+  const startedAt = refund.lastAttemptAt ?? refund.createdAt;
+  return now.getTime() - new Date(startedAt).getTime() >= REFUND_STUCK_AFTER_MS;
+}
+
+/** Sends a newly approved Refund. */
+export async function payRefund(
+  db: Db,
+  provider: PaymentProvider,
+  refundId: number,
+  now: Date
+): Promise<PayResult> {
+  const claimed = db
+    .update(refunds)
+    .set({ lastAttemptAt: now.toISOString(), attempts: sql`${refunds.attempts} + 1` })
+    .where(
+      and(
+        eq(refunds.id, refundId),
+        eq(refunds.status, RefundStatus.Pending),
+        isNull(refunds.lastAttemptAt)
+      )
+    )
+    .run().changes;
+
+  if (claimed === 0) {
+    return { ok: false, status: 409, error: "This refund is already being sent." };
+  }
+  return sendClaimedRefund(db, provider, refundId);
+}
+
+/**
+ * Sends a Failed Refund again, or a Pending one that was left stuck. It is the
+ * same Refund for the same approved amount: never a new Refund Request or a
+ * second Refund.
+ */
+export async function retryRefund(
+  db: Db,
+  provider: PaymentProvider,
+  refundId: number,
+  now: Date
+): Promise<PayResult> {
+  const refund = getRefund(db, refundId);
+  if (!refund) {
+    return { ok: false, status: 404, error: "Refund not found." };
+  }
+  if (refund.status === RefundStatus.Issued) {
+    return { ok: false, status: 409, error: "This refund has already been issued." };
+  }
+
+  const stuckBefore = new Date(now.getTime() - REFUND_STUCK_AFTER_MS).toISOString();
+  const claimed = db
+    .update(refunds)
+    .set({
+      status: RefundStatus.Pending,
+      failureReason: null,
+      lastAttemptAt: now.toISOString(),
+      attempts: sql`${refunds.attempts} + 1`,
+    })
+    .where(
+      and(
+        eq(refunds.id, refundId),
+        or(
+          eq(refunds.status, RefundStatus.Failed),
+          and(
+            eq(refunds.status, RefundStatus.Pending),
+            lte(
+              sql`coalesce(${refunds.lastAttemptAt}, ${refunds.createdAt})`,
+              stuckBefore
+            )
+          )
+        )
+      )
+    )
+    .run().changes;
+
+  if (claimed === 0) {
+    return {
+      ok: false,
+      status: 409,
+      error: "This refund is still being sent. Try again in a few minutes.",
+    };
+  }
+  return sendClaimedRefund(db, provider, refundId);
+}
+
+async function sendClaimedRefund(
+  db: Db,
+  provider: PaymentProvider,
+  refundId: number
+): Promise<PayResult> {
+  const refund = getRefund(db, refundId)!;
+  const request = db
+    .select({ purchaseId: refundRequests.purchaseId })
+    .from(refundRequests)
+    .where(eq(refundRequests.id, refund.refundRequestId))
+    .get()!;
+
+  let result: RefundPaymentResult;
+  try {
+    result = await provider.refund({
+      refundId: refund.id,
+      purchaseId: request.purchaseId,
+      amount: refund.approvedAmount,
+    });
+  } catch (error) {
+    result = {
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  const recordedAt = new Date();
+  return db.transaction((tx): PayResult => {
+    if (result.status === "issued") {
+      tx.update(refunds)
+        .set({
+          status: RefundStatus.Issued,
+          providerReference: result.providerReference,
+          failureReason: null,
+          issuedAt: recordedAt.toISOString(),
+        })
+        .where(eq(refunds.id, refundId))
+        .run();
+      return { ok: true, status: RefundStatus.Issued };
+    }
+
+    tx.update(refunds)
+      .set({ status: RefundStatus.Failed, failureReason: result.reason })
+      .where(eq(refunds.id, refundId))
+      .run();
+    return { ok: true, status: RefundStatus.Failed };
   });
 }
