@@ -1,6 +1,5 @@
-import { and, count, desc, eq, isNull } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import * as schema from "~/db/schema";
+import { and, count, desc, eq, gte, isNull } from "drizzle-orm";
+import type { Queryable } from "~/db/types";
 import {
   DeliveryChannel,
   DeliveryStatus,
@@ -15,7 +14,11 @@ import {
   type RegisteredType,
 } from "~/lib/notification-types.server";
 import { hasOptedOut } from "~/lib/email-opt-outs.server";
-import { unsubscribeUrl } from "~/lib/unsubscribe.server";
+import { retentionCutoff } from "~/lib/retention.server";
+import {
+  canSignUnsubscribeLinks,
+  unsubscribeUrl,
+} from "~/lib/unsubscribe.server";
 
 // ─── Notifications ───
 // Creating a Notification writes its Feed row and, for a Type with email, its
@@ -23,9 +26,7 @@ import { unsubscribeUrl } from "~/lib/unsubscribe.server";
 // the Notification is about, so both commit or neither does. The outbox
 // poller sends the email later (docs/adr/0013).
 
-type Db = BetterSQLite3Database<typeof schema>;
-type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-export type Queryable = Db | Tx;
+export type { Queryable };
 
 export type Notified = { notificationId: number; deliveryId: number | null };
 
@@ -63,6 +64,16 @@ export function notify<T extends RegisteredType>(
     !definition.mandatory &&
     hasOptedOut(db, rendered.recipientUserId, type)
   ) {
+    return { notificationId: notification.id, deliveryId: null };
+  }
+
+  // An optional email can't go out without its unsubscribe link. Skip the
+  // email rather than fail the change this Notification is about (posting a
+  // Comment must not break because a secret is missing).
+  if (!definition.mandatory && !canSignUnsubscribeLinks()) {
+    console.error(
+      `Notification ${notification.id} (${type}) has no email Delivery: UNSUBSCRIBE_SECRET is not set, so its unsubscribe link can't be signed.`
+    );
     return { notificationId: notification.id, deliveryId: null };
   }
 
@@ -117,7 +128,17 @@ function withUnsubscribeFooter(
 
 // ─── The Notification Feed ───
 // A person only ever sees and marks their own Notifications: every query is
-// scoped to the recipient.
+// scoped to the recipient. The Feed stops at the retention boundary, so it
+// looks the same just before the daily cleanup as just after, and an old
+// Notification kept back by a pending email never shows.
+
+/** The Feed's Notifications for one person: theirs, and not past retention. */
+function inFeed(userId: number, now: Date) {
+  return and(
+    eq(notifications.recipientUserId, userId),
+    gte(notifications.createdAt, retentionCutoff(now))
+  );
+}
 
 export const FEED_PAGE_SIZE = 20;
 
@@ -130,17 +151,16 @@ export type FeedItem = {
   read: boolean;
 };
 
-export function getUnreadCount(db: Queryable, userId: number): number {
+export function getUnreadCount(
+  db: Queryable,
+  userId: number,
+  now: Date
+): number {
   return (
     db
       .select({ count: count() })
       .from(notifications)
-      .where(
-        and(
-          eq(notifications.recipientUserId, userId),
-          isNull(notifications.readAt)
-        )
-      )
+      .where(and(inFeed(userId, now), isNull(notifications.readAt)))
       .get()?.count ?? 0
   );
 }
@@ -149,12 +169,13 @@ export function getUnreadCount(db: Queryable, userId: number): number {
 export function getFeed(
   db: Queryable,
   userId: number,
-  limit: number
+  limit: number,
+  now: Date
 ): { items: FeedItem[]; total: number; unread: number } {
   const items = db
     .select()
     .from(notifications)
-    .where(eq(notifications.recipientUserId, userId))
+    .where(inFeed(userId, now))
     .orderBy(desc(notifications.createdAt), desc(notifications.id))
     .limit(limit)
     .all()
@@ -171,10 +192,10 @@ export function getFeed(
     db
       .select({ count: count() })
       .from(notifications)
-      .where(eq(notifications.recipientUserId, userId))
+      .where(inFeed(userId, now))
       .get()?.count ?? 0;
 
-  return { items, total, unread: getUnreadCount(db, userId) };
+  return { items, total, unread: getUnreadCount(db, userId, now) };
 }
 
 /**

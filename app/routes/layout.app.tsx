@@ -220,7 +220,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     refundOutcome: await getDevRefundOutcome(request),
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
     unreadNotificationCount: currentUserId
-      ? getUnreadCount(db, currentUserId)
+      ? getUnreadCount(db, currentUserId, new Date())
       : 0,
   };
 }

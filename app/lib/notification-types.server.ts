@@ -7,8 +7,9 @@ import { formatPrice } from "~/lib/utils";
 // ─── Notification Types ───
 // The registry of everything a Notification Type means: its Channels, whether
 // it is Mandatory, its Postmark stream, and its Feed and email templates.
-// Nothing about a Type is stored beyond its name on each row, so adding a
-// Type is a new enum value plus an entry here.
+// Nothing about a Type is stored beyond its name on each row (an email
+// Delivery also copies whether it was Mandatory, to send it without a lookup),
+// so adding a Type is a new enum value plus an entry here.
 //
 // Templates are rendered once, when the Notification is created. Later
 // wording changes never rewrite rows that already exist.

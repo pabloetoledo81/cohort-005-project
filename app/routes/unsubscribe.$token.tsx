@@ -1,22 +1,46 @@
-import { data, Link } from "react-router";
+import { data, Form, Link } from "react-router";
+import { z } from "zod";
 import type { Route } from "./+types/unsubscribe.$token";
 import { db } from "~/db";
 import { setEmailOptOut } from "~/lib/email-opt-outs.server";
-import { emailTypes } from "~/lib/notification-types.server";
+import { emailTypes, isOptionalEmail } from "~/lib/notification-types.server";
 import { verifyUnsubscribeToken } from "~/lib/unsubscribe.server";
+import { parseParams } from "~/lib/validation";
 
-// One-click unsubscribe from one Notification Type's email. No login: the
-// signed token says who and which Type. A GET comes from the "Turn off these
-// emails" link in the email; a POST comes from a mail client's unsubscribe
-// button (RFC 8058, body "List-Unsubscribe=One-Click"). Both opt out at once,
-// and doing it twice is harmless.
+// Unsubscribe from one Notification Type's email, with no login: the signed
+// token says who and which Type.
+//
+// Opening the link (GET) changes nothing: it shows what would be turned off
+// and a button. Mail scanners open links in emails by themselves, so a GET
+// that opted people out would do it without them knowing (RFC 8058). The
+// opt-out happens on POST, which comes from that button or from a mail
+// client's one-click unsubscribe (body "List-Unsubscribe=One-Click"). Doing it
+// twice is harmless.
 
-function optOut(token: string) {
+const paramsSchema = z.object({ token: z.string().min(1) });
+
+function verify(params: Route.LoaderArgs["params"]) {
+  const { token } = parseParams(params, paramsSchema);
   const verified = verifyUnsubscribeToken(token);
-  if (!verified) {
+  if (!verified || !isOptionalEmail(verified.type)) {
     throw data("This unsubscribe link isn't valid.", { status: 400 });
   }
+  const label =
+    emailTypes().find((t) => t.type === verified.type)?.label ?? "these";
+  return { ...verified, label };
+}
 
+export function meta() {
+  return [{ title: "Turn off emails — Cadence" }];
+}
+
+export async function loader({ params }: Route.LoaderArgs) {
+  const { label } = verify(params);
+  return { label };
+}
+
+export async function action({ params }: Route.ActionArgs) {
+  const verified = verify(params);
   const result = setEmailOptOut(
     db,
     verified.userId,
@@ -24,33 +48,16 @@ function optOut(token: string) {
     true,
     new Date()
   );
-  if (!result.ok) {
-    throw data(result.error, { status: 400 });
-  }
-
-  const label =
-    emailTypes().find((t) => t.type === verified.type)?.label ?? "these";
-  return { label };
-}
-
-export function meta() {
-  return [{ title: "Email turned off — Cadence" }];
-}
-
-export async function loader({ params }: Route.LoaderArgs) {
-  return optOut(params.token);
-}
-
-export async function action({ params }: Route.ActionArgs) {
-  return optOut(params.token);
+  if (!result.ok) throw data(result.error, { status: 400 });
+  return { turnedOff: true };
 }
 
 export default function Unsubscribe({ loaderData, actionData }: Route.ComponentProps) {
-  const { label } = actionData ?? loaderData;
-  return (
-    <div className="flex min-h-screen items-center justify-center p-6">
-      <div className="max-w-md text-center">
-        <h1 className="mb-2 text-2xl font-bold">Email turned off</h1>
+  const { label } = loaderData;
+
+  if (actionData?.turnedOff) {
+    return (
+      <Centered title="Email turned off">
         <p className="text-muted-foreground">
           You won't get “{label}” emails any more. You'll still see them in
           your notifications in Cadence.
@@ -62,6 +69,34 @@ export default function Unsubscribe({ loaderData, actionData }: Route.ComponentP
           </Link>
           .
         </p>
+      </Centered>
+    );
+  }
+
+  return (
+    <Centered title="Turn off these emails?">
+      <p className="text-muted-foreground">
+        You'll stop getting “{label}” emails. You'll still see them in your
+        notifications in Cadence.
+      </p>
+      <Form method="post" className="mt-6">
+        <button
+          type="submit"
+          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          Turn off these emails
+        </button>
+      </Form>
+    </Centered>
+  );
+}
+
+function Centered({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center p-6">
+      <div className="max-w-md text-center">
+        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
+        {children}
       </div>
     </div>
   );

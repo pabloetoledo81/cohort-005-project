@@ -1,6 +1,5 @@
 import { and, eq, inArray, lt, ne, notExists } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import * as schema from "~/db/schema";
+import type { Db } from "~/db/types";
 import {
   DeliveryStatus,
   notificationDeliveries,
@@ -16,19 +15,18 @@ import {
 // Deletes in small batches, Deliveries first, so SQLite's write lock is held
 // briefly. A run that stops partway finishes on the next run.
 
-type Db = BetterSQLite3Database<typeof schema>;
-
 export const RETENTION_DAYS = 180;
 export const BATCH_SIZE = 500;
 export const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-function cutoff(now: Date) {
+/** Notifications created before this are past retention. */
+export function retentionCutoff(now: Date) {
   return new Date(now.getTime() - RETENTION_DAYS * 86_400_000).toISOString();
 }
 
 /** Deletes one batch. Returns how many rows it deleted. */
 export function deleteExpiredBatch(db: Db, now: Date): number {
-  const expired = lt(notifications.createdAt, cutoff(now));
+  const expired = lt(notifications.createdAt, retentionCutoff(now));
 
   const deliveries = db
     .delete(notificationDeliveries)

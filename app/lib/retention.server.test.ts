@@ -1,11 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { DeliveryChannel, DeliveryStatus, NotificationType } from "~/db/schema";
 import {
   BATCH_SIZE,
+  CLEANUP_INTERVAL_MS,
   deleteExpiredBatch,
   deleteExpiredNotifications,
+  startRetentionTimer,
 } from "./retention.server";
 import { getFeed } from "./notifications.server";
 
@@ -103,6 +105,31 @@ describe("retention", () => {
 
     await deleteExpiredNotifications(db, NOW);
 
-    expect(getFeed(db, base.user.id, 20)).toMatchObject({ total: 1 });
+    expect(getFeed(db, base.user.id, 20, NOW)).toMatchObject({ total: 1 });
+  });
+});
+
+describe("the retention timer", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("cleans up once at startup and then every 24 hours", async () => {
+    vi.useFakeTimers({ now: NOW });
+    addNotification(400);
+
+    const stop = startRetentionTimer(db);
+    // Let the startup run finish (it yields between batches).
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(notificationIds()).toEqual([]);
+
+    // Something expires during the day: the next daily run removes it.
+    addNotification(400);
+    await vi.advanceTimersByTimeAsync(CLEANUP_INTERVAL_MS - 2000);
+    expect(notificationIds()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(notificationIds()).toEqual([]);
+
+    stop();
   });
 });

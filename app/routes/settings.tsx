@@ -98,7 +98,7 @@ export async function action({ request }: Route.ActionArgs) {
   if (formData.get("intent") === "email-preference") {
     const preference = parseFormData(formData, emailPreferenceSchema);
     if (!preference.success) {
-      return data({ emailError: "Invalid request." }, { status: 400 });
+      throw data("Invalid request.", { status: 400 });
     }
     const result = setEmailOptOut(
       db,
@@ -108,7 +108,8 @@ export async function action({ request }: Route.ActionArgs) {
       new Date()
     );
     if (!result.ok) {
-      return data({ emailError: result.error }, { status: 400 });
+      // Only optional Types have a toggle, so this means a forged request.
+      throw data(result.error, { status: 400 });
     }
     return { emailSaved: true };
   }
@@ -327,17 +328,11 @@ function EmailNotifications({
 }
 
 function EmailToggle({ preference }: { preference: EmailPreference }) {
-  const fetcher = useFetcher<{ emailSaved?: boolean; emailError?: string }>();
+  const fetcher = useFetcher();
   // Show the choice optimistically while it saves.
   const emailOn = fetcher.formData
     ? fetcher.formData.get("emailOn") === "true"
     : preference.emailOn;
-
-  useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data?.emailError) {
-      toast.error(fetcher.data.emailError);
-    }
-  }, [fetcher.state, fetcher.data]);
 
   return (
     <fetcher.Form method="post" className="flex items-center justify-between gap-3">
