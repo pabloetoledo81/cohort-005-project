@@ -97,15 +97,19 @@ A Refund Request a Platform Admin has accepted. Approving it ends what the Purch
 A Refund Request a Platform Admin has turned down. Nothing the Purchase granted is lost, it has no Refund, and the buyer may raise a new Refund Request.
 
 **Refund**:
-The money returned to the buyer after their Refund Request is approved. It is always the full amount they paid. A declined Refund Request has no Refund.
+The money returned to the buyer after their Refund Request is approved. For a Team Licence it is always the full amount paid. For an Individual Purchase it is an amount the Platform Admin chooses, more than nothing and up to the amount paid. It is sent in one go, so it is either issued or failed, never partly paid. A declined Refund Request has no Refund.
 _Avoid_: Reversal, Chargeback, Cancellation
+
+**Partial Refund**:
+A Refund for less than the amount paid. Only an Individual Purchase can have one, and the Platform Admin must tell the buyer why.
+_Avoid_: Pro-rata refund
 
 **Pending Refund**:
 A Refund whose Refund Request has been approved, where the money hasn't been confirmed as sent yet.
 _Avoid_: Pending (for a Refund Request awaiting review)
 
 **Issued Refund**:
-A Refund where the money has been confirmed as sent back to the buyer.
+A Refund where the whole approved amount has been confirmed as sent back to the buyer.
 _Avoid_: Completed, Paid out
 
 **Failed Refund**:
