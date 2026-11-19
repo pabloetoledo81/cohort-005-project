@@ -898,8 +898,8 @@ function RequestRefund({
     <div className="border-t pt-4">
       <p className="mb-2 text-sm font-medium">Request a refund</p>
       <p className="mb-3 text-xs text-muted-foreground">
-        We will send {formatPrice(amount)} back to the card you paid with, once
-        someone has read your note.
+        You paid {formatPrice(amount)}. Someone will read your note and decide
+        how much to refund, up to the full amount, to the card you paid with.
       </p>
       <fetcher.Form
         method="post"

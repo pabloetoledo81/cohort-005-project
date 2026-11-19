@@ -44,6 +44,9 @@ export type RefundRequestPayload = {
   buyer: { id: number; name: string };
   courseTitle: string;
   amountPaid: number;
+  /** Set once approved: the full amount for a Team Licence, the amount the
+   * Platform Admin chose for an Individual Purchase. */
+  approvedAmount: number | null;
   kind: PurchaseKind;
   /** The Platform Admin's note. It goes in the email only, never the Feed. */
   note: string | null;
@@ -76,6 +79,17 @@ function refundNotification(
   };
 }
 
+/**
+ * The approved amount, and for a Partial Refund the amount paid beside it:
+ * "$40.00 (of the $79.00 you paid)".
+ */
+export function refundAmount(p: RefundRequestPayload): string {
+  const approved = p.approvedAmount ?? p.amountPaid;
+  return approved < p.amountPaid
+    ? `${formatPrice(approved)} (of the ${formatPrice(p.amountPaid)} you paid)`
+    : formatPrice(approved);
+}
+
 function noteLines(note: string | null) {
   return note ? ["", note] : [];
 }
@@ -92,7 +106,11 @@ const refundRequestRaised: Definition<RefundRequestPayload> = {
       "Refund requested",
       [
         `We have your refund request for "${p.courseTitle}".`,
-        `The refund is for ${formatPrice(p.amountPaid)}, the amount you paid.`,
+        // A Team Licence is refunded in full; an Individual Purchase's amount
+        // is decided on review, so don't promise it yet.
+        p.kind === "team_licence"
+          ? `The refund is for ${formatPrice(p.amountPaid)}, the amount you paid.`
+          : `You paid ${formatPrice(p.amountPaid)} for it.`,
         "",
         "Our team reviews every refund request by hand. You do not need to do anything else. We'll let you know once it's been decided.",
       ]
@@ -111,7 +129,7 @@ const refundRequestApproved: Definition<RefundRequestPayload> = {
       "Refund approved",
       [
         `We have approved your refund request for "${p.courseTitle}".`,
-        `Your refund of ${formatPrice(p.amountPaid)} has been approved. We'll let you know as soon as the money has been sent.`,
+        `Your refund of ${refundAmount(p)} has been approved. We'll let you know as soon as the money has been sent.`,
         ...noteLines(p.note),
       ]
     ),
@@ -132,6 +150,43 @@ const refundRequestDeclined: Definition<RefundRequestPayload> = {
         ...noteLines(p.note),
         "",
         "You still have everything you bought. If something changes, you can raise a new refund request.",
+      ]
+    ),
+};
+
+// ─── Refunds ───
+// The money, after approval. Fired where a payment attempt's outcome is
+// recorded: "Refund issued" once, "Refund failed" on every failed attempt.
+// The buyer never sees the provider's reason; there's nothing for them to do.
+
+const refundIssued: Definition<RefundRequestPayload> = {
+  label: "Refund issued",
+  sendsEmail: true,
+  mandatory: true,
+  stream: "transactional",
+  render: (p) =>
+    refundNotification(
+      p,
+      `Your refund of ${refundAmount(p)} for ${p.courseTitle} has been sent`,
+      "Refund sent",
+      [`We've sent your refund of ${refundAmount(p)} for "${p.courseTitle}".`]
+    ),
+};
+
+const refundFailed: Definition<RefundRequestPayload> = {
+  label: "Refund failed",
+  sendsEmail: true,
+  mandatory: true,
+  stream: "transactional",
+  render: (p) =>
+    refundNotification(
+      p,
+      `We couldn't send your refund for ${p.courseTitle}; we're on it`,
+      "We couldn't send your refund",
+      [
+        `We tried to send your refund of ${refundAmount(p)} for "${p.courseTitle}", but the payment didn't go through.`,
+        "",
+        "You don't need to do anything: our team is on it, and we'll let you know as soon as it's been sent.",
       ]
     ),
 };
@@ -246,6 +301,8 @@ export interface NotificationPayloads {
   [NotificationType.RefundRequestRaised]: RefundRequestPayload;
   [NotificationType.RefundRequestApproved]: RefundRequestPayload;
   [NotificationType.RefundRequestDeclined]: RefundRequestPayload;
+  [NotificationType.RefundIssued]: RefundRequestPayload;
+  [NotificationType.RefundFailed]: RefundRequestPayload;
 }
 
 export type RegisteredType = keyof NotificationPayloads;
@@ -259,6 +316,8 @@ export const notificationTypes: {
   [NotificationType.RefundRequestRaised]: refundRequestRaised,
   [NotificationType.RefundRequestApproved]: refundRequestApproved,
   [NotificationType.RefundRequestDeclined]: refundRequestDeclined,
+  [NotificationType.RefundIssued]: refundIssued,
+  [NotificationType.RefundFailed]: refundFailed,
 };
 
 export function isRegistered(type: NotificationType): type is RegisteredType {

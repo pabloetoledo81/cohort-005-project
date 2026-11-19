@@ -3,7 +3,11 @@ import { Form, useLocation } from "react-router";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import type { UserRole } from "~/db/schema";
-import { ChevronDown, ChevronUp, Globe } from "lucide-react";
+import { ChevronDown, ChevronUp, CreditCard, Globe } from "lucide-react";
+import {
+  SIMULATED_REFUND_OUTCOMES,
+  type SimulatedRefundOutcome,
+} from "~/lib/payment-simulator";
 
 interface DevUser {
   id: number;
@@ -17,6 +21,7 @@ interface DevUIProps {
   devCountry: string | null;
   countryTierInfo: { tier: number; discount: number; label: string };
   countries: { code: string; name: string }[];
+  refundOutcome: SimulatedRefundOutcome;
 }
 
 const roleBadgeColors: Record<string, string> = {
@@ -40,7 +45,14 @@ function RoleBadge({ role }: { role: string }) {
   );
 }
 
-export function DevUI({ users, currentUser, devCountry, countryTierInfo, countries }: DevUIProps) {
+export function DevUI({
+  users,
+  currentUser,
+  devCountry,
+  countryTierInfo,
+  countries,
+  refundOutcome,
+}: DevUIProps) {
   const [minimized, setMinimized] = useState(false);
   const [open, setOpen] = useState(false);
   const location = useLocation();
@@ -165,6 +177,31 @@ export function DevUI({ users, currentUser, devCountry, countryTierInfo, countri
               )}
             </div>
           )}
+        </div>
+
+        {/* Canned response from the payment simulator */}
+        <div className="mt-3 border-t border-dashed pt-3">
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CreditCard className="size-3" />
+            Refund payments
+          </div>
+          <Form
+            method="post"
+            action={`/api/set-dev-refund-outcome?redirectTo=${encodeURIComponent(location.pathname + location.search)}`}
+          >
+            <select
+              name="outcome"
+              defaultValue={refundOutcome}
+              onChange={(e) => e.target.form?.requestSubmit()}
+              className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+            >
+              {SIMULATED_REFUND_OUTCOMES.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Form>
         </div>
       </div>
     </div>

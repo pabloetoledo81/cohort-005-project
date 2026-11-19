@@ -10,6 +10,7 @@ import {
   UserRole,
   CourseStatus,
   LessonProgressStatus,
+  RefundRequestStatus,
   RefundStatus,
   QuestionType,
   TeamMemberRole,
@@ -81,6 +82,7 @@ async function seed() {
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
     DROP TABLE IF EXISTS refunds;
+    DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS purchases;
     DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS lessons;
@@ -2775,10 +2777,10 @@ This course is still in draft while the cluster examples are rewritten against t
       updatedAt: daysAgo(6),
     })
     .run();
-  db.insert(schema.refunds)
+  db.insert(schema.refundRequests)
     .values({
       purchaseId: liamPurchase.id,
-      status: RefundStatus.Open,
+      status: RefundRequestStatus.Open,
       reason: "Bought the wrong one, I meant the advanced course.",
       requestedAt: daysAgo(4),
     })
@@ -2790,16 +2792,92 @@ This course is still in draft while the cluster examples are rewritten against t
   // A Team Licence with no Claimed Seats, so a Platform Admin can approve it.
   // Its Seats are on hold while the request is open.
 
-  db.insert(schema.refunds)
+  db.insert(schema.refundRequests)
     .values({
       purchaseId: novakLicence.purchase.id,
-      status: RefundStatus.Open,
+      status: RefundRequestStatus.Open,
       reason: "Our design team was reorganised and nobody needs these seats now.",
       requestedAt: daysAgo(1),
     })
     .run();
 
   console.log("Created Marta's Refund Request on her Team Licence.");
+
+  // ─── Approved Refund Requests and their Refunds ───
+  // One Issued Refund and one Failed Partial Refund, so the admin refunds
+  // screen, Retry, and the buyer's Settings page have every Refund state to
+  // show. Approval ended both Enrollments, so neither buyer is enrolled.
+
+  function approvedRefund(
+    email: string,
+    amountPaid: number,
+    approvedAmount: number,
+    refund: {
+      status: RefundStatus;
+      failureReason?: string;
+      providerReference?: string;
+    },
+    decisionNote: string | null
+  ) {
+    const buyer = studentByEmail(email);
+    const [purchase] = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyer.id,
+        courseId: course4.id,
+        amountPaid,
+        country: null,
+        createdAt: daysAgo(12),
+      })
+      .returning()
+      .all();
+    const [request] = db
+      .insert(schema.refundRequests)
+      .values({
+        purchaseId: purchase.id,
+        status: RefundRequestStatus.Approved,
+        reason: "The course wasn't what I expected.",
+        requestedAt: daysAgo(10),
+        resolvedAt: daysAgo(9),
+        resolvedByUserId: admin.id,
+        decisionNote,
+      })
+      .returning()
+      .all();
+    db.insert(schema.refunds)
+      .values({
+        refundRequestId: request.id,
+        approvedAmount,
+        status: refund.status,
+        failureReason: refund.failureReason ?? null,
+        providerReference: refund.providerReference ?? null,
+        attempts: 1,
+        lastAttemptAt: daysAgo(9),
+        issuedAt: refund.status === RefundStatus.Issued ? daysAgo(9) : null,
+        createdAt: daysAgo(9),
+      })
+      .run();
+  }
+
+  approvedRefund(
+    "olivia.martinez@student.dev",
+    6900,
+    6900,
+    { status: RefundStatus.Issued, providerReference: "sim_refund_seed_olivia" },
+    null
+  );
+  approvedRefund(
+    "sophia.davis@student.dev",
+    6900,
+    3500,
+    {
+      status: RefundStatus.Failed,
+      failureReason: "The card issuer declined the refund (simulated).",
+    },
+    "You'd worked through about half of the course, so we're refunding half."
+  );
+
+  console.log("Created an Issued Refund and a Failed Partial Refund.");
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one

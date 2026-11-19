@@ -29,6 +29,20 @@ describe("sendEmail", () => {
   });
 });
 
+describe("outboxTransport", () => {
+  it("keeps every email, even two to one person at once", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "outbox-"));
+    const transport = outboxTransport(directory);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+
+    await transport.send({ to: "liam@example.com", subject: "One", body: "1" });
+    await transport.send({ to: "liam@example.com", subject: "Two", body: "2" });
+    now.mockRestore();
+
+    expect(readdirSync(directory)).toHaveLength(2);
+  });
+});
+
 describe("postmarkTransport", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

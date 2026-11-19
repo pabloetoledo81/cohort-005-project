@@ -1,4 +1,8 @@
 import { createCookieSessionStorage } from "react-router";
+import {
+  parseSimulatedRefundOutcome,
+  type SimulatedRefundOutcome,
+} from "~/lib/payment-simulator";
 
 const sessionStorage = createCookieSessionStorage({
   cookie: {
@@ -44,5 +48,22 @@ export async function setDevCountry(request: Request, country: string | null) {
   } else {
     session.unset("devCountry");
   }
+  return sessionStorage.commitSession(session);
+}
+
+/** The canned response the payment simulator gives this session. */
+export async function getDevRefundOutcome(
+  request: Request
+): Promise<SimulatedRefundOutcome> {
+  const session = await getSession(request);
+  return parseSimulatedRefundOutcome(session.get("devRefundOutcome"));
+}
+
+export async function setDevRefundOutcome(
+  request: Request,
+  outcome: SimulatedRefundOutcome
+) {
+  const session = await getSession(request);
+  session.set("devRefundOutcome", outcome);
   return sessionStorage.commitSession(session);
 }

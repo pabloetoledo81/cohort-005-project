@@ -170,6 +170,8 @@ describe("Email Opt-outs", () => {
       "Refund Request raised",
       "Refund Request approved",
       "Refund Request declined",
+      "Refund issued",
+      "Refund failed",
     ]);
     expect(
       preferences.find((p) => p.type === NotificationType.NewDiscussionQuestion)?.emailOn
