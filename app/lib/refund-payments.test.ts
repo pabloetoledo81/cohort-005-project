@@ -109,7 +109,9 @@ function approve(id: number, amount: number | null = null, note: string | null =
 }
 
 function refund(id: number) {
-  return db.select().from(schema.refunds).where(eq(schema.refunds.id, id)).get()!;
+  const row = db.select().from(schema.refunds).where(eq(schema.refunds.id, id)).get();
+  if (!row) throw new Error(`No Refund ${id}`);
+  return row;
 }
 
 const isEnrolled = () =>
@@ -227,6 +229,22 @@ describe("sending a Refund", () => {
     });
   });
 
+  it("keeps only the first line of a thrown error, trimmed", async () => {
+    const refundId = approve(raise(buyForSelf().id));
+    const noisy: PaymentProvider = {
+      async refund() {
+        throw new Error(`${"x".repeat(500)}
+    at internal (secret.ts:1:1)`);
+      },
+    };
+
+    await payRefund(db, noisy, refundId, NOW);
+
+    const reason = refund(refundId).failureReason ?? "";
+    expect(reason).not.toContain("secret.ts");
+    expect(reason.length).toBeLessThan(400);
+  });
+
   it("treats a provider that throws as a failure", async () => {
     const refundId = approve(raise(buyForSelf().id));
     const broken: PaymentProvider = {
@@ -239,7 +257,7 @@ describe("sending a Refund", () => {
 
     expect(refund(refundId)).toMatchObject({
       status: RefundStatus.Failed,
-      failureReason: "connection reset",
+      failureReason: "The payment provider couldn't be reached: connection reset",
     });
   });
 
@@ -322,6 +340,39 @@ describe("retrying a Refund", () => {
     const result = await retryRefund(db, succeed, refundId, later(REFUND_STUCK_AFTER_MS));
 
     expect(result).toEqual({ ok: true, status: RefundStatus.Issued });
+  });
+
+  it("ignores a slow attempt that a Retry overtook", async () => {
+    const refundId = approve(raise(buyForSelf().id));
+
+    // The first attempt hangs until released.
+    let release: () => void = () => {};
+    const slow: PaymentProvider = {
+      refund: () =>
+        new Promise((resolve) => {
+          release = () => resolve({ status: "issued", providerReference: "slow" });
+        }),
+    };
+    const first = payRefund(db, slow, refundId, NOW);
+
+    // Long enough later to count as stuck, a Platform Admin retries.
+    const retried = await retryRefund(db, succeed, refundId, later(REFUND_STUCK_AFTER_MS));
+    expect(retried).toEqual({ ok: true, status: RefundStatus.Issued });
+
+    release();
+    expect(await first).toMatchObject({ ok: false, status: 409 });
+
+    expect(refund(refundId)).toMatchObject({
+      status: RefundStatus.Issued,
+      providerReference: `sim_refund_${refundId}`,
+      attempts: 2,
+    });
+    const issued = db
+      .select()
+      .from(schema.notifications)
+      .all()
+      .filter((n) => n.type === schema.NotificationType.RefundIssued);
+    expect(issued).toHaveLength(1);
   });
 
   it("recovers a Pending Refund that was never attempted", async () => {
@@ -463,7 +514,8 @@ describe("Refund issued and Refund failed Notifications", () => {
       type: schema.NotificationType.RefundFailed,
       text: "We couldn't send your refund for Test Course; we're on it",
     });
-    const email = emailFor(failed.id)!;
+    const email = emailFor(failed.id);
+    if (!email) throw new Error("No email for the Refund failed Notification");
     expect(email.subject).toBe("We couldn't send your refund — Test Course");
     expect(email.body).toContain("You don't need to do anything");
     expect(failed.text).not.toContain(SIMULATED_FAILURE_REASON);

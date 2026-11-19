@@ -111,17 +111,19 @@ export async function loader({ request, url }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ request }: Route.ActionArgs) {
+/**
+ * What a decision or retry tells the Platform Admin. A payment that fails is
+ * not a failed action: the approval or retry happened, so it is a warning.
+ * Anything that stops the action throws (CODING_STANDARDS.md).
+ */
+type ActionOutcome = { tone: "success" | "warning"; message: string };
+
+export async function action({ request }: Route.ActionArgs): Promise<ActionOutcome> {
   const platformAdmin = await requirePlatformAdmin(request);
 
-  const formData = await request.formData();
-  const parsed = parseFormData(formData, adminRefundActionSchema);
-
+  const parsed = parseFormData(await request.formData(), adminRefundActionSchema);
   if (!parsed.success) {
-    return data(
-      { error: Object.values(parsed.errors)[0] ?? "Invalid input." },
-      { status: 400 }
-    );
+    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", { status: 400 });
   }
 
   const input = parsed.data;
@@ -134,10 +136,8 @@ export async function action({ request }: Route.ActionArgs) {
       input.note,
       new Date()
     );
-    if (!result.ok) {
-      return data({ error: result.error }, { status: result.status });
-    }
-    return { success: true, message: "Refund request declined." };
+    if (!result.ok) throw data(result.error, { status: result.status });
+    return { tone: "success", message: "Refund request declined." };
   }
 
   // Built before anything is approved, so a simulator that refuses to run
@@ -146,20 +146,17 @@ export async function action({ request }: Route.ActionArgs) {
   try {
     provider = simulatedPaymentProvider(await getDevRefundOutcome(request));
   } catch (error) {
-    return data(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status: 503 }
-    );
+    throw data(error instanceof Error ? error.message : String(error), {
+      status: 503,
+    });
   }
 
   if (input.intent === "retry") {
     const result = await retryRefund(db, provider, input.refundId, new Date());
-    if (!result.ok) {
-      return data({ error: result.error }, { status: result.status });
-    }
+    if (!result.ok) throw data(result.error, { status: result.status });
     return result.status === RefundStatus.Issued
-      ? { success: true, message: "Refund issued." }
-      : { error: "The refund failed again." };
+      ? { tone: "success", message: "Refund issued." }
+      : { tone: "warning", message: "The refund failed again. You can retry it." };
   }
 
   const approved = approveRefundRequest(
@@ -170,18 +167,16 @@ export async function action({ request }: Route.ActionArgs) {
     input.note || null,
     new Date()
   );
-  if (!approved.ok) {
-    return data({ error: approved.error }, { status: approved.status });
-  }
+  if (!approved.ok) throw data(approved.error, { status: approved.status });
 
   // The approval has committed; now send the money.
   const paid = await payRefund(db, provider, approved.refundId, new Date());
-  if (paid.ok && paid.status === RefundStatus.Issued) {
-    return { success: true, message: "Refund request approved and the refund issued." };
-  }
-  return {
-    error: "Refund request approved, but the refund failed. You can retry it.",
-  };
+  return paid.ok && paid.status === RefundStatus.Issued
+    ? { tone: "success", message: "Refund request approved and the refund issued." }
+    : {
+        tone: "warning",
+        message: "Refund request approved, but the refund failed. You can retry it.",
+      };
 }
 
 const FILTERS: { status: RefundRequestStatus; label: string }[] = [
@@ -310,21 +305,26 @@ function RefundRequestCard({
 }: {
   refundRequest: RefundRequestForReview;
 }) {
-  const fetcher = useFetcher<
-    { success: true; message: string } | { error: string }
-  >();
+  const fetcher = useFetcher<typeof action>();
   const [note, setNote] = useState("");
   const fullAmount = (refundRequest.amountPaid / 100).toFixed(2);
   const [amount, setAmount] = useState(fullAmount);
   const isSubmitting = fetcher.state !== "idle";
   const isOpen = refundRequest.status === RefundRequestStatus.Open;
   const isIndividual = refundRequest.kind === "individual_purchase";
-  const isPartial = isIndividual && Number(amount) < Number(fullAmount);
+  // Checked here so a typo is caught before the action, which throws.
+  const amountCents = Math.round(Number(amount) * 100);
+  const amountIsValid =
+    !isIndividual ||
+    (/^\d+(\.\d{1,2})?$/.test(amount.trim()) &&
+      amountCents > 0 &&
+      amountCents <= refundRequest.amountPaid);
+  const isPartial = isIndividual && amountIsValid && amountCents < refundRequest.amountPaid;
 
   useEffect(() => {
     if (fetcher.state !== "idle" || !fetcher.data) return;
-    if ("error" in fetcher.data) {
-      toast.error(fetcher.data.error);
+    if (fetcher.data.tone === "warning") {
+      toast.warning(fetcher.data.message);
     } else {
       toast.success(fetcher.data.message);
     }
@@ -404,7 +404,15 @@ function RefundRequestCard({
                   up to {formatPrice(refundRequest.amountPaid)}
                 </span>
               </label>
-            ) : (
+            ) : null}
+            {isIndividual && !amountIsValid ? (
+              <p className="text-xs text-destructive">
+                Enter an amount above $0 and up to{" "}
+                {formatPrice(refundRequest.amountPaid)}, like 40 or 39.50. To
+                return nothing, decline it.
+              </p>
+            ) : null}
+            {isIndividual ? null : (
               <p className="text-sm text-muted-foreground">
                 A Team Licence is refunded in full:{" "}
                 {formatPrice(refundRequest.amountPaid)}.
@@ -433,6 +441,7 @@ function RefundRequestCard({
                 disabled={
                   isSubmitting ||
                   !refundRequest.canApprove ||
+                  !amountIsValid ||
                   (isPartial && note.trim().length === 0)
                 }
               >

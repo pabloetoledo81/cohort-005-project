@@ -1,4 +1,16 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
@@ -901,6 +913,30 @@ export function canRetryRefund(refund: Refund, now: Date): boolean {
   return now.getTime() - new Date(startedAt).getTime() >= REFUND_STUCK_AFTER_MS;
 }
 
+/**
+ * Claims a Refund for one payment attempt: marks it Pending and counts the
+ * attempt, but only while `claimable` holds. The attempt number the claim
+ * leaves behind identifies the attempt, so only it may record an outcome.
+ */
+function claimRefund(
+  db: Db,
+  refundId: number,
+  claimable: SQL | undefined,
+  now: Date
+): Refund | undefined {
+  return db
+    .update(refunds)
+    .set({
+      status: RefundStatus.Pending,
+      failureReason: null,
+      lastAttemptAt: now.toISOString(),
+      attempts: sql`${refunds.attempts} + 1`,
+    })
+    .where(and(eq(refunds.id, refundId), claimable))
+    .returning()
+    .get();
+}
+
 /** Sends a newly approved Refund. */
 export async function payRefund(
   db: Db,
@@ -908,22 +944,16 @@ export async function payRefund(
   refundId: number,
   now: Date
 ): Promise<PayResult> {
-  const claimed = db
-    .update(refunds)
-    .set({ lastAttemptAt: now.toISOString(), attempts: sql`${refunds.attempts} + 1` })
-    .where(
-      and(
-        eq(refunds.id, refundId),
-        eq(refunds.status, RefundStatus.Pending),
-        isNull(refunds.lastAttemptAt)
-      )
-    )
-    .run().changes;
-
-  if (claimed === 0) {
+  const claimed = claimRefund(
+    db,
+    refundId,
+    and(eq(refunds.status, RefundStatus.Pending), isNull(refunds.lastAttemptAt)),
+    now
+  );
+  if (!claimed) {
     return { ok: false, status: 409, error: "This refund is already being sent." };
   }
-  return sendClaimedRefund(db, provider, refundId);
+  return sendClaimedRefund(db, provider, claimed, now);
 }
 
 /**
@@ -946,99 +976,116 @@ export async function retryRefund(
   }
 
   const stuckBefore = new Date(now.getTime() - REFUND_STUCK_AFTER_MS).toISOString();
-  const claimed = db
-    .update(refunds)
-    .set({
-      status: RefundStatus.Pending,
-      failureReason: null,
-      lastAttemptAt: now.toISOString(),
-      attempts: sql`${refunds.attempts} + 1`,
-    })
-    .where(
+  const claimed = claimRefund(
+    db,
+    refundId,
+    or(
+      eq(refunds.status, RefundStatus.Failed),
       and(
-        eq(refunds.id, refundId),
-        or(
-          eq(refunds.status, RefundStatus.Failed),
-          and(
-            eq(refunds.status, RefundStatus.Pending),
-            lte(
-              sql`coalesce(${refunds.lastAttemptAt}, ${refunds.createdAt})`,
-              stuckBefore
-            )
-          )
-        )
+        eq(refunds.status, RefundStatus.Pending),
+        lte(sql`coalesce(${refunds.lastAttemptAt}, ${refunds.createdAt})`, stuckBefore)
       )
-    )
-    .run().changes;
-
-  if (claimed === 0) {
+    ),
+    now
+  );
+  if (!claimed) {
     return {
       ok: false,
       status: 409,
       error: "This refund is still being sent. Try again in a few minutes.",
     };
   }
-  return sendClaimedRefund(db, provider, refundId);
+  return sendClaimedRefund(db, provider, claimed, now);
+}
+
+const MAX_FAILURE_REASON_LENGTH = 300;
+
+/** What a Platform Admin is shown when the provider throws instead of answering. */
+function providerErrorReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const firstLine = message.split(/\r?\n/)[0].slice(0, MAX_FAILURE_REASON_LENGTH);
+  return `The payment provider couldn't be reached: ${firstLine}`;
 }
 
 async function sendClaimedRefund(
   db: Db,
   provider: PaymentProvider,
-  refundId: number
+  claimed: Refund,
+  now: Date
 ): Promise<PayResult> {
-  const refund = getRefund(db, refundId)!;
   const request = db
     .select({ purchaseId: refundRequests.purchaseId })
     .from(refundRequests)
-    .where(eq(refundRequests.id, refund.refundRequestId))
-    .get()!;
+    .where(eq(refundRequests.id, claimed.refundRequestId))
+    .get();
+  // A required foreign key: a Refund always has its Refund Request.
+  if (!request) {
+    throw new Error(`Refund ${claimed.id} has no Refund Request.`);
+  }
 
   let result: RefundPaymentResult;
   try {
     result = await provider.refund({
-      refundId: refund.id,
+      refundId: claimed.id,
       purchaseId: request.purchaseId,
-      amount: refund.approvedAmount,
+      amount: claimed.approvedAmount,
     });
   } catch (error) {
-    result = {
-      status: "failed",
-      reason: error instanceof Error ? error.message : String(error),
-    };
+    result = { status: "failed", reason: providerErrorReason(error) };
   }
 
-  const recordedAt = new Date();
   return db.transaction((tx): PayResult => {
+    // Record the outcome only if this attempt still owns the Refund. A slow
+    // attempt overtaken by a Retry must not record a second outcome, or the
+    // buyer would hear twice.
+    const recorded = tx
+      .update(refunds)
+      .set(
+        result.status === "issued"
+          ? {
+              status: RefundStatus.Issued,
+              providerReference: result.providerReference,
+              failureReason: null,
+              issuedAt: now.toISOString(),
+            }
+          : { status: RefundStatus.Failed, failureReason: result.reason }
+      )
+      .where(
+        and(
+          eq(refunds.id, claimed.id),
+          eq(refunds.status, RefundStatus.Pending),
+          eq(refunds.attempts, claimed.attempts)
+        )
+      )
+      .run().changes;
+
+    if (recorded === 0) {
+      return {
+        ok: false,
+        status: 409,
+        error: "Another attempt to send this refund finished first.",
+      };
+    }
+
+    const purchase = getPurchase(tx, request.purchaseId);
+    if (!purchase) {
+      throw new Error(`Refund Request ${claimed.refundRequestId} has no Purchase.`);
+    }
     // The buyer hears about each outcome in the same transaction that
     // records it: "Refund issued" once, "Refund failed" on every failure.
-    const purchase = getPurchase(tx, request.purchaseId)!;
     const payload = refundRequestPayload(
       tx,
       purchase,
-      refund.refundRequestId,
+      claimed.refundRequestId,
       null,
-      refund.approvedAmount
+      claimed.approvedAmount
     );
 
     if (result.status === "issued") {
-      tx.update(refunds)
-        .set({
-          status: RefundStatus.Issued,
-          providerReference: result.providerReference,
-          failureReason: null,
-          issuedAt: recordedAt.toISOString(),
-        })
-        .where(eq(refunds.id, refundId))
-        .run();
-      notify(tx, NotificationType.RefundIssued, payload, recordedAt);
+      notify(tx, NotificationType.RefundIssued, payload, now);
       return { ok: true, status: RefundStatus.Issued };
     }
-
-    tx.update(refunds)
-      .set({ status: RefundStatus.Failed, failureReason: result.reason })
-      .where(eq(refunds.id, refundId))
-      .run();
-    notify(tx, NotificationType.RefundFailed, payload, recordedAt);
+    notify(tx, NotificationType.RefundFailed, payload, now);
     return { ok: true, status: RefundStatus.Failed };
   });
 }

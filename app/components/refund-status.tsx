@@ -22,7 +22,7 @@ const BUYER_REFUND_LABELS: Record<
       "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   },
   [RefundStatus.Failed]: {
-    label: "Refund not sent yet",
+    label: "Refund failed",
     detail: "We couldn't send your refund; we're on it.",
     className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
   },
