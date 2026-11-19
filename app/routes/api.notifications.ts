@@ -23,17 +23,23 @@ async function requireUserId(request: Request) {
   return userId;
 }
 
+// "Load older" grows the page 20 at a time; the cap keeps one request small.
 const MAX_LIMIT = 1_000;
+
+const feedQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(FEED_PAGE_SIZE),
+});
 
 export async function loader({ request }: Route.LoaderArgs) {
   const userId = await requireUserId(request);
-  const requested = Number(new URL(request.url).searchParams.get("limit"));
-  const limit =
-    Number.isInteger(requested) && requested > 0
-      ? Math.min(requested, MAX_LIMIT)
-      : FEED_PAGE_SIZE;
+  const query = feedQuerySchema.safeParse(
+    Object.fromEntries(new URL(request.url).searchParams)
+  );
+  if (!query.success) {
+    throw data("Invalid request.", { status: 400 });
+  }
 
-  return getFeed(db, userId, limit);
+  return getFeed(db, userId, query.data.limit, new Date());
 }
 
 const actionSchema = z.discriminatedUnion("intent", [

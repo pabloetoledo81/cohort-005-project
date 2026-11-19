@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   sqliteTable,
   text,
@@ -465,9 +466,10 @@ export const notifications = sqliteTable(
     readAt: text("read_at"),
   },
   (table) => [
+    // Newest first, as the Feed reads it.
     index("notifications_recipient_created_idx").on(
       table.recipientUserId,
-      table.createdAt
+      sql`${table.createdAt} desc`
     ),
   ]
 );

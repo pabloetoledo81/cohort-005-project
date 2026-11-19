@@ -8,11 +8,23 @@ import { NotificationType } from "~/db/schema";
 // in old emails, which is acceptable because Settings still works.
 //
 // The secret comes from UNSUBSCRIBE_SECRET, set from a secrets manager or the
-// host's secret store. Never commit it. Without it, production refuses to
-// start sending; development makes up a random one per process (links then
-// stop working after a restart).
+// host's secret store. Never commit it. Without it, production can't sign
+// links, so optional emails are skipped (the Feed still gets everything; see
+// canSignUnsubscribeLinks). Development makes up a random one per process
+// (links then stop working after a restart).
 
 let devSecret: string | undefined;
+
+/**
+ * Whether unsubscribe links can be signed. An optional email must never go
+ * out without one, so when this is false the email is skipped, not sent bare.
+ */
+export function canSignUnsubscribeLinks(): boolean {
+  return (
+    Boolean(process.env.UNSUBSCRIBE_SECRET) ||
+    process.env.NODE_ENV !== "production"
+  );
+}
 
 function secret(): string {
   const configured = process.env.UNSUBSCRIBE_SECRET;

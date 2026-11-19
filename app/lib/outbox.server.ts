@@ -1,6 +1,5 @@
 import { and, asc, eq, lte } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import * as schema from "~/db/schema";
+import type { Db } from "~/db/types";
 import {
   DeliveryStatus,
   notificationDeliveries,
@@ -16,8 +15,6 @@ import { unsubscribeHeaders } from "~/lib/unsubscribe.server";
 // marked sent only after the transport accepts it, so a crash between the two
 // sends it again. Temporary failures are retried with backoff; permanent ones
 // and the last attempt mark the Delivery failed.
-
-type Db = BetterSQLite3Database<typeof schema>;
 
 export const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 50;
@@ -86,8 +83,8 @@ export async function processDueDeliveries(
 
 // ─── Retries ───
 // About five attempts over roughly an hour: the delay before attempt n + 1 is
-// RETRY_DELAYS_MINUTES[n - 1]. Attempts land at 0, 1, 5, 15 and 40 minutes.
-export const RETRY_DELAYS_MINUTES = [1, 4, 10, 25];
+// RETRY_DELAYS_MINUTES[n - 1]. Attempts land at 0, 1, 6, 21 and 61 minutes.
+export const RETRY_DELAYS_MINUTES = [1, 5, 15, 40];
 export const MAX_ATTEMPTS = RETRY_DELAYS_MINUTES.length + 1;
 
 function recordFailure(

@@ -41,8 +41,9 @@ function recordingTransport() {
   return { sent, transport };
 }
 
+/** Queues a refund email; its Delivery always exists, so the id is narrowed. */
 function queueRefundEmail(at = NOW) {
-  return notify(
+  const queued = notify(
     db,
     NotificationType.RefundRequestRaised,
     {
@@ -56,6 +57,8 @@ function queueRefundEmail(at = NOW) {
     },
     at
   );
+  if (queued.deliveryId === null) throw new Error("No email Delivery was queued.");
+  return { notificationId: queued.notificationId, deliveryId: queued.deliveryId };
 }
 
 function minutesLater(minutes: number) {
@@ -67,11 +70,13 @@ function minutesAfterNow(minutes: number) {
 }
 
 function delivery(id: number) {
-  return db
+  const row = db
     .select()
     .from(schema.notificationDeliveries)
     .all()
-    .find((d) => d.id === id)!;
+    .find((d) => d.id === id);
+  if (!row) throw new Error(`No Delivery ${id}`);
+  return row;
 }
 
 describe("the email outbox", () => {
@@ -96,12 +101,12 @@ describe("the email outbox", () => {
     ]);
     // A Mandatory Type carries no unsubscribe headers.
     expect(sent[0].headers).toBeUndefined();
-    expect(delivery(deliveryId!)).toMatchObject({
+    expect(delivery(deliveryId)).toMatchObject({
       status: DeliveryStatus.Sent,
       attempts: 1,
       providerMessageId: "msg-1",
     });
-    expect(delivery(deliveryId!).sentAt).not.toBeNull();
+    expect(delivery(deliveryId).sentAt).not.toBeNull();
   });
 
   it("sends each Delivery once", async () => {
@@ -145,7 +150,7 @@ describe("the email outbox", () => {
     };
 
     await processDueDeliveries(db, failing, NOW);
-    expect(delivery(deliveryId!)).toMatchObject({
+    expect(delivery(deliveryId)).toMatchObject({
       status: DeliveryStatus.Pending,
       attempts: 1,
       lastError: "Postmark returned HTTP 503",
@@ -154,12 +159,12 @@ describe("the email outbox", () => {
 
     // Not due yet: nothing is attempted.
     await processDueDeliveries(db, failing, new Date(NOW.getTime() + 30_000));
-    expect(delivery(deliveryId!).attempts).toBe(1);
+    expect(delivery(deliveryId).attempts).toBe(1);
 
     await processDueDeliveries(db, failing, minutesLater(1));
-    expect(delivery(deliveryId!)).toMatchObject({
+    expect(delivery(deliveryId)).toMatchObject({
       attempts: 2,
-      nextAttemptAt: minutesAfterNow(1 + 4),
+      nextAttemptAt: minutesAfterNow(1 + 5),
     });
   });
 
@@ -173,7 +178,7 @@ describe("the email outbox", () => {
 
     await processDueDeliveries(db, failing, NOW);
 
-    expect(delivery(deliveryId!).status).toBe(DeliveryStatus.Pending);
+    expect(delivery(deliveryId).status).toBe(DeliveryStatus.Pending);
   });
 
   it("gives up after the last attempt and logs it", async () => {
@@ -188,22 +193,24 @@ describe("the email outbox", () => {
     let at = NOW;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       await processDueDeliveries(db, failing, at);
-      at = new Date(delivery(deliveryId!).nextAttemptAt);
+      at = new Date(delivery(deliveryId).nextAttemptAt);
     }
 
-    expect(delivery(deliveryId!)).toMatchObject({
+    expect(delivery(deliveryId)).toMatchObject({
       status: DeliveryStatus.Failed,
       attempts: MAX_ATTEMPTS,
       lastError: "Postmark returned HTTP 500",
     });
     expect(error).toHaveBeenCalledOnce();
     expect(MAX_ATTEMPTS).toBe(5);
-    // Five attempts span roughly an hour.
-    expect(RETRY_DELAYS_MINUTES.reduce((a, b) => a + b)).toBeLessThanOrEqual(60);
+    // Five attempts span about an hour.
+    const span = RETRY_DELAYS_MINUTES.reduce((a, b) => a + b);
+    expect(span).toBeGreaterThanOrEqual(55);
+    expect(span).toBeLessThanOrEqual(65);
 
     // A failed Delivery is never picked up again.
     await processDueDeliveries(db, failing, minutesLater(600));
-    expect(delivery(deliveryId!).attempts).toBe(MAX_ATTEMPTS);
+    expect(delivery(deliveryId).attempts).toBe(MAX_ATTEMPTS);
   });
 
   it("doesn't retry a permanent failure", async () => {
@@ -217,7 +224,7 @@ describe("the email outbox", () => {
 
     await processDueDeliveries(db, failing, NOW);
 
-    expect(delivery(deliveryId!)).toMatchObject({
+    expect(delivery(deliveryId)).toMatchObject({
       status: DeliveryStatus.Failed,
       attempts: 1,
     });
@@ -237,8 +244,8 @@ describe("the email outbox", () => {
 
     await processDueDeliveries(db, flaky, NOW);
 
-    expect(delivery(first.deliveryId!).status).toBe(DeliveryStatus.Pending);
-    expect(delivery(second.deliveryId!).status).toBe(DeliveryStatus.Sent);
+    expect(delivery(first.deliveryId).status).toBe(DeliveryStatus.Pending);
+    expect(delivery(second.deliveryId).status).toBe(DeliveryStatus.Sent);
   });
 
   it("leaves the Notification alone when the email fails", async () => {
@@ -252,8 +259,8 @@ describe("the email outbox", () => {
 
     await processDueDeliveries(db, failing, NOW);
 
-    expect(delivery(deliveryId!).status).not.toBe(DeliveryStatus.Sent);
-    expect(delivery(deliveryId!).lastError).toContain("boom");
+    expect(delivery(deliveryId).status).not.toBe(DeliveryStatus.Sent);
+    expect(delivery(deliveryId).lastError).toContain("boom");
     expect(
       db.select().from(schema.notifications).all().map((n) => n.id)
     ).toEqual([notificationId]);

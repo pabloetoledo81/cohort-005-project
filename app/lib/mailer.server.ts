@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 
 // ─── Transactional email ───
 // Postmark delivers every email when POSTMARK_SERVER_TOKEN is set. Without a
@@ -52,6 +53,13 @@ const PERMANENT_POSTMARK_ERROR_CODES = new Set([300, 406]);
 
 const SEND_TIMEOUT_MS = 15_000;
 
+// What Postmark answers with. Parsed, not cast: it's a response from outside.
+const postmarkSentSchema = z.object({ MessageID: z.string().optional() });
+const postmarkErrorSchema = z.object({
+  ErrorCode: z.number().optional(),
+  Message: z.string().optional(),
+});
+
 export interface MailTransport {
   send(email: Email): Promise<SendResult>;
 }
@@ -87,8 +95,8 @@ export function postmarkTransport(serverToken: string): MailTransport {
         throw await postmarkError(response);
       }
 
-      const sent = (await response.json()) as { MessageID?: string };
-      return { messageId: sent.MessageID ?? null };
+      const sent = postmarkSentSchema.safeParse(await response.json());
+      return { messageId: sent.success ? (sent.data.MessageID ?? null) : null };
     },
   };
 }
@@ -103,12 +111,11 @@ async function postmarkError(response: Response): Promise<MailSendError> {
   let errorCode: number | null = null;
   let detail = "";
   try {
-    const body = (await response.json()) as {
-      ErrorCode?: number;
-      Message?: string;
-    };
-    errorCode = typeof body.ErrorCode === "number" ? body.ErrorCode : null;
-    detail = body.Message ?? "";
+    const body = postmarkErrorSchema.safeParse(await response.json());
+    if (body.success) {
+      errorCode = body.data.ErrorCode ?? null;
+      detail = body.data.Message ?? "";
+    }
   } catch {
     // Not JSON: keep just the HTTP status.
   }

@@ -189,6 +189,22 @@ describe("Email Opt-outs", () => {
   });
 });
 
+describe("without UNSUBSCRIBE_SECRET in production", () => {
+  it("still saves the Comment and its Notification, but skips the optional email", () => {
+    vi.stubEnv("UNSUBSCRIBE_SECRET", "");
+    vi.stubEnv("NODE_ENV", "production");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(() => postQuestion()).not.toThrow();
+
+    expect(db.select().from(schema.comments).all()).toHaveLength(1);
+    expect(notifications()).toHaveLength(1);
+    expect(deliveries()).toHaveLength(0);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("UNSUBSCRIBE_SECRET"));
+    error.mockRestore();
+  });
+});
+
 describe("the unsubscribe link and headers", () => {
   it("ends every optional email with a link that opts out of that Type", () => {
     postQuestion();

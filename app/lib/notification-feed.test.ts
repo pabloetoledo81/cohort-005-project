@@ -43,7 +43,7 @@ describe("the Notification Feed", () => {
     addNotification(base.user.id, 5, "newer");
     addNotification(base.instructor.id, 1, "someone else's");
 
-    const feed = getFeed(db, base.user.id, 20);
+    const feed = getFeed(db, base.user.id, 20, NOW);
 
     expect(feed.items.map((i) => i.text)).toEqual(["newer", "older"]);
     expect(feed.total).toBe(2);
@@ -54,17 +54,17 @@ describe("the Notification Feed", () => {
   it("returns 20 at a time and reports the total", () => {
     for (let i = 0; i < 45; i++) addNotification(base.user.id, i);
 
-    const first = getFeed(db, base.user.id, 20);
+    const first = getFeed(db, base.user.id, 20, NOW);
     expect(first.items).toHaveLength(20);
     expect(first.total).toBe(45);
 
-    const older = getFeed(db, base.user.id, 40);
+    const older = getFeed(db, base.user.id, 40, NOW);
     expect(older.items.slice(0, 20)).toEqual(first.items);
     expect(older.items).toHaveLength(40);
   });
 
   it("is empty for someone with no Notifications", () => {
-    expect(getFeed(db, base.user.id, 20)).toEqual({ items: [], total: 0, unread: 0 });
+    expect(getFeed(db, base.user.id, 20, NOW)).toEqual({ items: [], total: 0, unread: 0 });
   });
 
   it("marks a clicked Notification read and returns its link", () => {
@@ -72,8 +72,8 @@ describe("the Notification Feed", () => {
 
     expect(markNotificationRead(db, base.user.id, n.id, NOW)).toBe("/settings");
 
-    expect(getUnreadCount(db, base.user.id)).toBe(0);
-    expect(getFeed(db, base.user.id, 20).items[0].read).toBe(true);
+    expect(getUnreadCount(db, base.user.id, NOW)).toBe(0);
+    expect(getFeed(db, base.user.id, 20, NOW).items[0].read).toBe(true);
   });
 
   it("keeps the first read time when clicked again", () => {
@@ -89,7 +89,7 @@ describe("the Notification Feed", () => {
     const theirs = addNotification(base.instructor.id, 1);
 
     expect(markNotificationRead(db, base.user.id, theirs.id, NOW)).toBeNull();
-    expect(getUnreadCount(db, base.instructor.id)).toBe(1);
+    expect(getUnreadCount(db, base.instructor.id, NOW)).toBe(1);
   });
 
   it("marks all of a person's Notifications read, and only theirs", () => {
@@ -99,8 +99,8 @@ describe("the Notification Feed", () => {
 
     markAllNotificationsRead(db, base.user.id, NOW);
 
-    expect(getUnreadCount(db, base.user.id)).toBe(0);
-    expect(getUnreadCount(db, base.instructor.id)).toBe(1);
+    expect(getUnreadCount(db, base.user.id, NOW)).toBe(0);
+    expect(getUnreadCount(db, base.instructor.id, NOW)).toBe(1);
   });
 });
 
