@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { LessonProgressStatus, RefundStatus, UserRole } from "~/db/schema";
@@ -55,6 +55,16 @@ beforeEach(() => {
         .get().id
   );
 });
+
+function lastEmail() {
+  const delivery = db
+    .select()
+    .from(schema.notificationDeliveries)
+    .orderBy(desc(schema.notificationDeliveries.id))
+    .get();
+  if (!delivery) throw new Error("No email Delivery was created.");
+  return delivery;
+}
 
 function addLearner(name: string) {
   return db
@@ -356,16 +366,17 @@ describe("approving a Refund Request", () => {
     });
   });
 
-  it("emails the buyer that the refund is on its way", () => {
+  it("emails the buyer that the refund was approved", () => {
     const purchase = buyForSelf(base.user.id);
     const id = raise(purchase.id, base.user.id);
 
     const result = approveRefundRequest(db, id, platformAdmin.id, null, NOW);
 
     if (!result.ok) throw new Error(result.error);
-    expect(result.email.to).toBe("test@example.com");
-    expect(result.email.subject).toBe("Refund approved — Test Course");
-    expect(result.email.body).toContain("$79.00");
+    const email = lastEmail();
+    expect(email.toAddress).toBe("test@example.com");
+    expect(email.subject).toBe("Refund approved — Test Course");
+    expect(email.body).toContain("$79.00");
   });
 });
 
@@ -393,7 +404,7 @@ describe("declining a Refund Request", () => {
     );
 
     if (!result.ok) throw new Error(result.error);
-    expect(result.email.body).toContain("You finished the course.");
+    expect(lastEmail().body).toContain("You finished the course.");
     expect(isEnrolled(base.user.id)).toBe(true);
     expect(checkRefundRequest(db, purchase.id, base.user.id, NOW).ok).toBe(true);
   });

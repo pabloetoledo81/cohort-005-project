@@ -42,6 +42,32 @@ export enum TeamMemberRole {
   Member = "member",
 }
 
+// The kind of thing that happened. What each Type means (who receives it,
+// its Channels, whether it is Mandatory) lives in the registry in
+// app/lib/notification-types.server.ts, not in the database.
+export enum NotificationType {
+  NewDiscussionQuestion = "new_discussion_question",
+  DiscussionQuestionAnswered = "discussion_question_answered",
+  ReplyToYourComment = "reply_to_your_comment",
+  RefundRequestRaised = "refund_request_raised",
+  RefundRequestApproved = "refund_request_approved",
+  RefundRequestDeclined = "refund_request_declined",
+  RefundIssued = "refund_issued",
+  RefundFailed = "refund_failed",
+}
+
+// The Notification Feed is not a Channel with Deliveries: the Notification
+// row is what the Feed shows. Only external Channels go through the outbox.
+export enum DeliveryChannel {
+  Email = "email",
+}
+
+export enum DeliveryStatus {
+  Pending = "pending",
+  Sent = "sent",
+  Failed = "failed",
+}
+
 // ─── Tables ───
 
 export const users = sqliteTable("users", {
@@ -374,3 +400,97 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// ─── Notifications ───
+// See docs/adr/0013 for why email goes through an outbox table.
+
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    recipientUserId: integer("recipient_user_id")
+      .notNull()
+      .references(() => users.id),
+    type: text("type").notNull().$type<NotificationType>(),
+    // The Feed line and its link, rendered when the Notification is created.
+    // Later template changes don't rewrite old rows.
+    text: text("text").notNull(),
+    href: text("href").notNull(),
+    // Traceability only — nothing is rendered from these.
+    commentId: integer("comment_id").references(() => comments.id),
+    refundRequestId: integer("refund_request_id").references(() => refunds.id),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    // Null until the recipient clicks it or marks all as read.
+    readAt: text("read_at"),
+  },
+  (table) => [
+    index("notifications_recipient_created_idx").on(
+      table.recipientUserId,
+      table.createdAt
+    ),
+  ]
+);
+
+// The outbox and the Delivery record in one. A Delivery may take several
+// attempts and ends either sent or failed.
+export const notificationDeliveries = sqliteTable(
+  "notification_deliveries",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    notificationId: integer("notification_id")
+      .notNull()
+      .references(() => notifications.id),
+    channel: text("channel").notNull().$type<DeliveryChannel>(),
+    // Rendered when the Notification is created; nothing is re-checked at
+    // send time.
+    toAddress: text("to_address").notNull(),
+    subject: text("subject").notNull(),
+    body: text("body").notNull(),
+    // True means no unsubscribe link and no List-Unsubscribe headers.
+    mandatory: integer("mandatory", { mode: "boolean" }).notNull(),
+    status: text("status")
+      .notNull()
+      .$type<DeliveryStatus>()
+      .default(DeliveryStatus.Pending),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    lastError: text("last_error"),
+    providerMessageId: text("provider_message_id"),
+    sentAt: text("sent_at"),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [
+    uniqueIndex("notification_deliveries_notification_channel_unique").on(
+      table.notificationId,
+      table.channel
+    ),
+    index("notification_deliveries_due_idx").on(
+      table.status,
+      table.nextAttemptAt
+    ),
+  ]
+);
+
+// A person's choice to stop email for one Notification Type. No row means
+// email is on, which is the default for everyone. Opting back in deletes the
+// row. A Mandatory Type can never have one; that is enforced on write.
+export const emailOptOuts = sqliteTable(
+  "email_opt_outs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id),
+    type: text("type").notNull().$type<NotificationType>(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [
+    uniqueIndex("email_opt_outs_user_type_unique").on(table.userId, table.type),
+  ]
+);
