@@ -154,6 +154,43 @@ const refundRequestDeclined: Definition<RefundRequestPayload> = {
     ),
 };
 
+// ─── Refunds ───
+// The money, after approval. Fired where a payment attempt's outcome is
+// recorded: "Refund issued" once, "Refund failed" on every failed attempt.
+// The buyer never sees the provider's reason; there's nothing for them to do.
+
+const refundIssued: Definition<RefundRequestPayload> = {
+  label: "Refund issued",
+  sendsEmail: true,
+  mandatory: true,
+  stream: "transactional",
+  render: (p) =>
+    refundNotification(
+      p,
+      `Your refund of ${refundAmount(p)} for ${p.courseTitle} has been sent`,
+      "Refund sent",
+      [`We've sent your refund of ${refundAmount(p)} for "${p.courseTitle}".`]
+    ),
+};
+
+const refundFailed: Definition<RefundRequestPayload> = {
+  label: "Refund failed",
+  sendsEmail: true,
+  mandatory: true,
+  stream: "transactional",
+  render: (p) =>
+    refundNotification(
+      p,
+      `We couldn't send your refund for ${p.courseTitle}; we're on it`,
+      "We couldn't send your refund",
+      [
+        `We tried to send your refund of ${refundAmount(p)} for "${p.courseTitle}", but the payment didn't go through.`,
+        "",
+        "You don't need to do anything: our team is on it, and we'll let you know as soon as it's been sent.",
+      ]
+    ),
+};
+
 // ─── Comments ───
 // Who is notified about a Comment is decided in
 // app/lib/comment-notifications.server.ts; these only render.
@@ -264,6 +301,8 @@ export interface NotificationPayloads {
   [NotificationType.RefundRequestRaised]: RefundRequestPayload;
   [NotificationType.RefundRequestApproved]: RefundRequestPayload;
   [NotificationType.RefundRequestDeclined]: RefundRequestPayload;
+  [NotificationType.RefundIssued]: RefundRequestPayload;
+  [NotificationType.RefundFailed]: RefundRequestPayload;
 }
 
 export type RegisteredType = keyof NotificationPayloads;
@@ -277,6 +316,8 @@ export const notificationTypes: {
   [NotificationType.RefundRequestRaised]: refundRequestRaised,
   [NotificationType.RefundRequestApproved]: refundRequestApproved,
   [NotificationType.RefundRequestDeclined]: refundRequestDeclined,
+  [NotificationType.RefundIssued]: refundIssued,
+  [NotificationType.RefundFailed]: refundFailed,
 };
 
 export function isRegistered(type: NotificationType): type is RegisteredType {

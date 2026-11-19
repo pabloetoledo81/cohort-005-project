@@ -1009,6 +1009,17 @@ async function sendClaimedRefund(
 
   const recordedAt = new Date();
   return db.transaction((tx): PayResult => {
+    // The buyer hears about each outcome in the same transaction that
+    // records it: "Refund issued" once, "Refund failed" on every failure.
+    const purchase = getPurchase(tx, request.purchaseId)!;
+    const payload = refundRequestPayload(
+      tx,
+      purchase,
+      refund.refundRequestId,
+      null,
+      refund.approvedAmount
+    );
+
     if (result.status === "issued") {
       tx.update(refunds)
         .set({
@@ -1019,6 +1030,7 @@ async function sendClaimedRefund(
         })
         .where(eq(refunds.id, refundId))
         .run();
+      notify(tx, NotificationType.RefundIssued, payload, recordedAt);
       return { ok: true, status: RefundStatus.Issued };
     }
 
@@ -1026,6 +1038,7 @@ async function sendClaimedRefund(
       .set({ status: RefundStatus.Failed, failureReason: result.reason })
       .where(eq(refunds.id, refundId))
       .run();
+    notify(tx, NotificationType.RefundFailed, payload, recordedAt);
     return { ok: true, status: RefundStatus.Failed };
   });
 }

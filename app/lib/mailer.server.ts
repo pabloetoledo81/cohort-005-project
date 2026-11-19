@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // ─── Transactional email ───
 // Postmark delivers every email when POSTMARK_SERVER_TOKEN is set. Without a
@@ -129,7 +130,12 @@ export function outboxTransport(directory: string): MailTransport {
   return {
     async send(email) {
       mkdirSync(directory, { recursive: true });
-      const file = join(directory, `${Date.now()}-${email.to}.json`);
+      // The random part keeps two emails to one person in the same
+      // millisecond from overwriting each other.
+      const file = join(
+        directory,
+        `${Date.now()}-${randomUUID().slice(0, 8)}-${email.to}.json`
+      );
       writeFileSync(
         file,
         JSON.stringify({ from: FROM_ADDRESS, ...email }, null, 2)

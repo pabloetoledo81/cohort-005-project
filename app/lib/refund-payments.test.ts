@@ -404,3 +404,116 @@ describe("the Watch Limit", () => {
     });
   });
 });
+
+describe("Refund issued and Refund failed Notifications", () => {
+  const later = (ms: number) => new Date(NOW.getTime() + ms);
+
+  function refundNotifications() {
+    return db
+      .select()
+      .from(schema.notifications)
+      .all()
+      .filter(
+        (n) =>
+          n.type === schema.NotificationType.RefundIssued ||
+          n.type === schema.NotificationType.RefundFailed
+      );
+  }
+
+  function emailFor(notificationId: number) {
+    return db
+      .select()
+      .from(schema.notificationDeliveries)
+      .where(eq(schema.notificationDeliveries.notificationId, notificationId))
+      .get();
+  }
+
+  it("tells the buyer once the Refund is issued, on the Feed and by email", async () => {
+    const id = raise(buyForSelf().id);
+    const refundId = approve(id);
+
+    await payRefund(db, succeed, refundId, NOW);
+
+    const [issued] = refundNotifications();
+    expect(refundNotifications()).toHaveLength(1);
+    expect(issued).toMatchObject({
+      recipientUserId: base.user.id,
+      type: schema.NotificationType.RefundIssued,
+      text: "Your refund of $79.00 for Test Course has been sent",
+      href: "/settings",
+      refundRequestId: id,
+    });
+    expect(emailFor(issued.id)).toMatchObject({
+      toAddress: "test@example.com",
+      subject: "Refund sent — Test Course",
+      mandatory: true,
+    });
+    expect(emailFor(issued.id)?.body).toContain(
+      'We\'ve sent your refund of $79.00 for "Test Course".'
+    );
+  });
+
+  it("tells the buyer when it fails, without the provider's reason", async () => {
+    const refundId = approve(raise(buyForSelf().id));
+
+    await payRefund(db, fail, refundId, NOW);
+
+    const [failed] = refundNotifications();
+    expect(failed).toMatchObject({
+      type: schema.NotificationType.RefundFailed,
+      text: "We couldn't send your refund for Test Course; we're on it",
+    });
+    const email = emailFor(failed.id)!;
+    expect(email.subject).toBe("We couldn't send your refund — Test Course");
+    expect(email.body).toContain("You don't need to do anything");
+    expect(failed.text).not.toContain(SIMULATED_FAILURE_REASON);
+    expect(email.body).not.toContain(SIMULATED_FAILURE_REASON);
+    // Mandatory: no unsubscribe link.
+    expect(email.body).not.toContain("/unsubscribe/");
+  });
+
+  it("sends one 'failed' per failure and one 'issued' at the end", async () => {
+    const refundId = approve(raise(buyForSelf().id));
+
+    await payRefund(db, fail, refundId, NOW);
+    await retryRefund(db, fail, refundId, later(1000));
+    await retryRefund(db, succeed, refundId, later(2000));
+
+    expect(refundNotifications().map((n) => n.type)).toEqual([
+      schema.NotificationType.RefundFailed,
+      schema.NotificationType.RefundFailed,
+      schema.NotificationType.RefundIssued,
+    ]);
+  });
+
+  it("names both amounts for a Partial Refund", async () => {
+    const refundId = approve(raise(buyForSelf().id), 4000, "Half.");
+
+    await payRefund(db, succeed, refundId, NOW);
+
+    const [issued] = refundNotifications();
+    expect(issued.text).toBe(
+      "Your refund of $40.00 (of the $79.00 you paid) for Test Course has been sent"
+    );
+    expect(emailFor(issued.id)?.body).toContain("$40.00 (of the $79.00 you paid)");
+  });
+
+  it("goes only to the Team Admin who bought a Team Licence, linking to /team", async () => {
+    const refundId = approve(raise(buySeats().id));
+
+    await payRefund(db, succeed, refundId, NOW);
+
+    const [issued] = refundNotifications();
+    expect(issued).toMatchObject({ recipientUserId: base.user.id, href: "/team" });
+    expect(refundNotifications()).toHaveLength(1);
+  });
+
+  it("writes nothing when the payment is refused as a duplicate", async () => {
+    const refundId = approve(raise(buyForSelf().id));
+    await payRefund(db, succeed, refundId, NOW);
+
+    await payRefund(db, succeed, refundId, NOW);
+
+    expect(refundNotifications()).toHaveLength(1);
+  });
+});
