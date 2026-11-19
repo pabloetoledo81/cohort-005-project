@@ -17,6 +17,17 @@ import { db } from "~/db";
 import { eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 import { listRefundRequestsForBuyer } from "~/lib/refunds.server";
+import {
+  getEmailPreferences,
+  setEmailOptOut,
+} from "~/lib/email-opt-outs.server";
+import { NotificationType } from "~/db/schema";
+
+const emailPreferenceSchema = z.object({
+  intent: z.literal("email-preference"),
+  type: z.nativeEnum(NotificationType),
+  emailOn: z.enum(["true", "false"]),
+});
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
@@ -50,6 +61,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
 
   const refundRequests = listRefundRequestsForBuyer(db, currentUserId);
+  const emailPreferences = getEmailPreferences(db, currentUserId);
 
   return {
     user: {
@@ -60,6 +72,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       role: currentUser.role,
     },
     refundRequests,
+    emailPreferences,
   };
 }
 
@@ -80,6 +93,25 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const formData = await request.formData();
+
+  if (formData.get("intent") === "email-preference") {
+    const preference = parseFormData(formData, emailPreferenceSchema);
+    if (!preference.success) {
+      return data({ emailError: "Invalid request." }, { status: 400 });
+    }
+    const result = setEmailOptOut(
+      db,
+      currentUser.id,
+      preference.data.type,
+      preference.data.emailOn === "false",
+      new Date()
+    );
+    if (!result.ok) {
+      return data({ emailError: result.error }, { status: 400 });
+    }
+    return { emailSaved: true };
+  }
+
   const parsed = parseFormData(formData, settingsSchema);
 
   if (!parsed.success) {
@@ -98,7 +130,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, refundRequests } = loaderData;
+  const { user, refundRequests, emailPreferences } = loaderData;
   const openCount = refundRequests.filter(
     (refundRequest) => refundRequest.status === RefundStatus.Open
   ).length;
@@ -188,6 +220,8 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
+      <EmailNotifications preferences={emailPreferences} />
+
       {refundRequests.length > 0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
@@ -236,6 +270,90 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </Card>
       )}
     </div>
+  );
+}
+
+type EmailPreference = {
+  type: NotificationType;
+  label: string;
+  mandatory: boolean;
+  emailOn: boolean;
+};
+
+/**
+ * One toggle per optional Notification Type. Mandatory Types are listed as
+ * always sent. Turning an email off never hides anything from the Feed.
+ */
+function EmailNotifications({
+  preferences,
+}: {
+  preferences: EmailPreference[];
+}) {
+  const optional = preferences.filter((p) => !p.mandatory);
+  const mandatory = preferences.filter((p) => p.mandatory);
+
+  return (
+    <Card className="mt-8 max-w-md">
+      <CardHeader>
+        <h2 className="text-lg font-semibold">Email notifications</h2>
+        <p className="text-sm text-muted-foreground">
+          Choose which emails you get. Everything still appears under the bell.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {optional.map((preference) => (
+          <EmailToggle key={preference.type} preference={preference} />
+        ))}
+        {mandatory.length > 0 && (
+          <div className="border-t pt-3">
+            <p className="text-sm font-medium">Always sent</p>
+            <ul className="mt-1 space-y-1 text-sm text-muted-foreground">
+              {mandatory.map((preference) => (
+                <li key={preference.type}>{preference.label}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function EmailToggle({ preference }: { preference: EmailPreference }) {
+  const fetcher = useFetcher<{ emailSaved?: boolean; emailError?: string }>();
+  // Show the choice optimistically while it saves.
+  const emailOn = fetcher.formData
+    ? fetcher.formData.get("emailOn") === "true"
+    : preference.emailOn;
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.emailError) {
+      toast.error(fetcher.data.emailError);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <fetcher.Form method="post" className="flex items-center justify-between gap-3">
+      <input type="hidden" name="intent" value="email-preference" />
+      <input type="hidden" name="type" value={preference.type} />
+      <input type="hidden" name="emailOn" value={String(!emailOn)} />
+      <span className="text-sm">{preference.label}</span>
+      <button
+        type="submit"
+        role="switch"
+        aria-checked={emailOn}
+        aria-label={`Email for ${preference.label}`}
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+          emailOn ? "bg-primary" : "bg-muted"
+        }`}
+      >
+        <span
+          className={`inline-block size-5 rounded-full bg-background shadow transition-transform ${
+            emailOn ? "translate-x-5" : "translate-x-0.5"
+          }`}
+        />
+      </button>
+    </fetcher.Form>
   );
 }
 

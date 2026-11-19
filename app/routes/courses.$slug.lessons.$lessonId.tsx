@@ -54,6 +54,7 @@ import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
 import { COUNTRIES } from "~/lib/ppp";
+import { notifyAboutNewComment } from "~/lib/comment-notifications.server";
 import { parseFormData, parseParams } from "~/lib/validation";
 
 const lessonParamsSchema = z.object({
@@ -427,11 +428,16 @@ function createComment(
     }
   }
 
-  return db
-    .insert(comments)
-    .values({ userId, lessonId, parentId, body: trimmed })
-    .returning()
-    .get();
+  // The Comment and the Notification about it commit together.
+  return db.transaction((tx) => {
+    const comment = tx
+      .insert(comments)
+      .values({ userId, lessonId, parentId, body: trimmed })
+      .returning()
+      .get();
+    notifyAboutNewComment(tx, comment, new Date());
+    return comment;
+  });
 }
 
 function updateComment(commentId: number, userId: number, body: string) {
